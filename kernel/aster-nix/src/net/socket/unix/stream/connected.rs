@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use super::endpoint::Endpoint;
+use super::{endpoint::Endpoint, UnixStreamSocket};
 use crate::{
     events::{IoEvents, Observer},
     net::socket::{unix::addr::UnixSocketAddrBound, SockShutdownCmd},
@@ -9,20 +9,30 @@ use crate::{
 };
 
 pub(super) struct Connected {
+    addr: Option<UnixSocketAddrBound>,
+    peer: Weak<UnixStreamSocket>,
     local_endpoint: Endpoint,
 }
 
 impl Connected {
-    pub(super) fn new(local_endpoint: Endpoint) -> Self {
-        Connected { local_endpoint }
+    pub(super) fn new(
+        addr: Option<UnixSocketAddrBound>,
+        peer: Weak<UnixStreamSocket>,
+        local_endpoint: Endpoint,
+    ) -> Self {
+        Connected {
+            addr,
+            peer,
+            local_endpoint,
+        }
     }
 
     pub(super) fn addr(&self) -> Option<&UnixSocketAddrBound> {
-        self.local_endpoint.addr()
+        self.addr.as_ref()
     }
 
-    pub(super) fn peer_addr(&self) -> Option<&UnixSocketAddrBound> {
-        self.local_endpoint.peer_addr()
+    pub(super) fn peer(&self) -> &Weak<UnixStreamSocket> {
+        &self.peer
     }
 
     pub(super) fn try_write(&self, buf: &[u8]) -> Result<usize> {

@@ -37,18 +37,23 @@ pub struct UnixStreamSocket {
 }
 
 impl UnixStreamSocket {
-    pub(super) fn new_init(init: Init, is_nonblocking: bool) -> Arc<Self> {
-        Arc::new(Self {
-            state: RwLock::new(State::Init(init)),
+    fn new_init(this: Weak<UnixStreamSocket>, is_nonblocking: bool) -> Self {
+        Self {
+            state: RwLock::new(State::Init(Init::new(this))),
             is_nonblocking: AtomicBool::new(is_nonblocking),
-        })
+        }
     }
 
-    pub(super) fn new_connected(connected: Connected, is_nonblocking: bool) -> Arc<Self> {
-        Arc::new(Self {
-            state: RwLock::new(State::Connected(connected)),
+    pub(super) fn new_connected(
+        addr: Option<UnixSocketAddrBound>,
+        peer: Weak<UnixStreamSocket>,
+        local_endpoint: Endpoint,
+        is_nonblocking: bool,
+    ) -> Self {
+        Self {
+            state: RwLock::new(State::Connected(Connected::new(addr, peer, local_endpoint))),
             is_nonblocking: AtomicBool::new(is_nonblocking),
-        })
+        }
     }
 }
 
@@ -60,15 +65,27 @@ enum State {
 
 impl UnixStreamSocket {
     pub fn new(is_nonblocking: bool) -> Arc<Self> {
-        Self::new_init(Init::new(), is_nonblocking)
+        Arc::new_cyclic(|this| Self::new_init(this.clone(), is_nonblocking))
     }
 
     pub fn new_pair(is_nonblocking: bool) -> (Arc<Self>, Arc<Self>) {
-        let (end_a, end_b) = Endpoint::new_pair(None, None);
-        (
-            Self::new_connected(Connected::new(end_a), is_nonblocking),
-            Self::new_connected(Connected::new(end_b), is_nonblocking),
-        )
+        let (this_end, peer_end) = Endpoint::new_pair();
+
+        let mut peer_storage = None;
+        let this = Arc::new_cyclic(|this_weak| {
+            let peer = Arc::new(Self::new_connected(
+                None,
+                this_weak.clone(),
+                peer_end,
+                is_nonblocking,
+            ));
+            let peer_weak = Arc::downgrade(&peer);
+            peer_storage = Some(peer);
+            Self::new_connected(None, peer_weak, this_end, is_nonblocking)
+        });
+        let peer = peer_storage.unwrap();
+
+        (this, peer)
     }
 
     fn bound_addr(&self) -> Option<UnixSocketAddrBound> {
@@ -110,7 +127,7 @@ impl UnixStreamSocket {
         }
     }
 
-    fn try_accept(&self) -> Result<(Arc<dyn FileLike>, SocketAddr)> {
+    fn try_accept(&self) -> Result<Arc<UnixStreamSocket>> {
         match &*self.state.read() {
             State::Listen(listen) => listen.try_accept() as _,
             _ => return_errno_with_message!(Errno::EINVAL, "the socket is not listening"),
@@ -232,7 +249,7 @@ impl Socket for UnixStreamSocket {
         // See also <https://elixir.bootlin.com/linux/v6.10.4/source/net/unix/af_unix.c#L1527>.
 
         let connected = match &*self.state.read() {
-            State::Init(init) => init.connect(&remote_addr)?,
+            State::Init(init) => init.connect(remote_addr)?,
             State::Listen(_) => {
                 return_errno_with_message!(Errno::EINVAL, "the socket is listening")
             }
@@ -268,11 +285,15 @@ impl Socket for UnixStreamSocket {
     }
 
     fn accept(&self) -> Result<(Arc<dyn FileLike>, SocketAddr)> {
-        if self.is_nonblocking() {
-            self.try_accept()
+        let peer = if self.is_nonblocking() {
+            self.try_accept()?
         } else {
-            self.wait_events(IoEvents::IN, || self.try_accept())
-        }
+            self.wait_events(IoEvents::IN, || self.try_accept())?
+        };
+
+        let peer_addr = peer.addr().unwrap();
+
+        Ok((peer as _, peer_addr))
     }
 
     fn shutdown(&self, cmd: SockShutdownCmd) -> Result<()> {
@@ -293,12 +314,16 @@ impl Socket for UnixStreamSocket {
     }
 
     fn peer_addr(&self) -> Result<SocketAddr> {
-        let peer_addr = match &*self.state.read() {
-            State::Connected(connected) => connected.peer_addr().cloned(),
+        let weak_peer = match &*self.state.read() {
+            State::Connected(connected) => connected.peer().clone(),
             _ => return_errno_with_message!(Errno::ENOTCONN, "the socket is not connected"),
         };
 
-        Ok(peer_addr.into())
+        let peer = weak_peer
+            .upgrade()
+            .ok_or_else(|| Error::with_message(Errno::ENOTCONN, "the peer socket is closed"))?;
+
+        peer.addr()
     }
 
     fn sendmsg(

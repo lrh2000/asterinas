@@ -2,11 +2,11 @@
 
 use keyable_arc::KeyableWeak;
 
-use super::{connected::Connected, endpoint::Endpoint, UnixStreamSocket};
+use super::UnixStreamSocket;
 use crate::{
     events::{IoEvents, Observer},
-    fs::{file_handle::FileLike, path::Dentry, utils::Inode},
-    net::socket::{unix::addr::UnixSocketAddrBound, SocketAddr},
+    fs::{path::Dentry, utils::Inode},
+    net::socket::unix::addr::UnixSocketAddrBound,
     prelude::*,
     process::signal::{Pollee, Poller},
 };
@@ -25,19 +25,8 @@ impl Listener {
         &self.addr
     }
 
-    pub(super) fn try_accept(&self) -> Result<(Arc<dyn FileLike>, SocketAddr)> {
-        let addr = self.addr().clone();
-
-        let connected = {
-            let local_endpoint = BACKLOG_TABLE.pop_incoming(&addr)?;
-            Connected::new(local_endpoint)
-        };
-
-        let peer_addr = connected.peer_addr().cloned().into();
-
-        let socket = UnixStreamSocket::new_connected(connected, false);
-
-        Ok((socket, peer_addr))
+    pub(super) fn try_accept(&self) -> Result<Arc<UnixStreamSocket>> {
+        BACKLOG_TABLE.pop_incoming(&self.addr)
     }
 
     pub(super) fn poll(&self, mask: IoEvents, poller: Option<&mut Poller>) -> IoEvents {
@@ -112,17 +101,21 @@ impl BacklogTable {
             .ok_or_else(|| Error::with_message(Errno::EINVAL, "the socket is not listened"))
     }
 
-    fn pop_incoming(&self, addr: &UnixSocketAddrBound) -> Result<Endpoint> {
+    fn pop_incoming(&self, addr: &UnixSocketAddrBound) -> Result<Arc<UnixStreamSocket>> {
         let backlog = self.get_backlog(addr)?;
 
-        if let Some(endpoint) = backlog.pop_incoming() {
-            Ok(endpoint)
+        if let Some(socket) = backlog.pop_incoming() {
+            Ok(socket)
         } else {
             return_errno_with_message!(Errno::EAGAIN, "no pending connection is available")
         }
     }
 
-    fn push_incoming(&self, addr: &UnixSocketAddrBound, endpoint: Endpoint) -> Result<()> {
+    fn push_incoming(
+        &self,
+        addr: &UnixSocketAddrBound,
+        socket: Arc<UnixStreamSocket>,
+    ) -> Result<()> {
         let backlog = self.get_backlog(addr).map_err(|_| {
             Error::with_message(
                 Errno::ECONNREFUSED,
@@ -130,7 +123,7 @@ impl BacklogTable {
             )
         })?;
 
-        backlog.push_incoming(endpoint)
+        backlog.push_incoming(socket)
     }
 
     fn remove_backlog(&self, addr: &UnixSocketAddrBound) {
@@ -146,7 +139,7 @@ impl BacklogTable {
 struct Backlog {
     pollee: Pollee,
     backlog: usize,
-    incoming_endpoints: Mutex<VecDeque<Endpoint>>,
+    incoming_sockets: Mutex<VecDeque<Arc<UnixStreamSocket>>>,
 }
 
 impl Backlog {
@@ -154,32 +147,32 @@ impl Backlog {
         Self {
             pollee: Pollee::new(IoEvents::empty()),
             backlog,
-            incoming_endpoints: Mutex::new(VecDeque::with_capacity(backlog)),
+            incoming_sockets: Mutex::new(VecDeque::with_capacity(backlog)),
         }
     }
 
-    fn push_incoming(&self, endpoint: Endpoint) -> Result<()> {
-        let mut endpoints = self.incoming_endpoints.lock();
-        if endpoints.len() >= self.backlog {
-            return_errno_with_message!(Errno::ECONNREFUSED, "incoming_endpoints is full");
+    fn push_incoming(&self, socket: Arc<UnixStreamSocket>) -> Result<()> {
+        let mut sockets = self.incoming_sockets.lock();
+        if sockets.len() >= self.backlog {
+            return_errno_with_message!(Errno::ECONNREFUSED, "incoming_sockets is full");
         }
-        endpoints.push_back(endpoint);
+        sockets.push_back(socket);
         self.pollee.add_events(IoEvents::IN);
         Ok(())
     }
 
-    fn pop_incoming(&self) -> Option<Endpoint> {
-        let mut incoming_endpoints = self.incoming_endpoints.lock();
-        let endpoint = incoming_endpoints.pop_front();
-        if incoming_endpoints.is_empty() {
+    fn pop_incoming(&self) -> Option<Arc<UnixStreamSocket>> {
+        let mut incoming_sockets = self.incoming_sockets.lock();
+        let socket = incoming_sockets.pop_front();
+        if incoming_sockets.is_empty() {
             self.pollee.del_events(IoEvents::IN);
         }
-        endpoint
+        socket
     }
 
     fn poll(&self, mask: IoEvents, poller: Option<&mut Poller>) -> IoEvents {
         // Lock to avoid any events may change pollee state when we poll
-        let _lock = self.incoming_endpoints.lock();
+        let _lock = self.incoming_sockets.lock();
         self.pollee.poll(mask, poller)
     }
 
@@ -209,6 +202,9 @@ pub(super) fn unregister_backlog(addr: &UnixSocketAddrBound) {
     BACKLOG_TABLE.remove_backlog(addr);
 }
 
-pub(super) fn push_incoming(remote_addr: &UnixSocketAddrBound, remote_end: Endpoint) -> Result<()> {
-    BACKLOG_TABLE.push_incoming(remote_addr, remote_end)
+pub(super) fn push_incoming(
+    remote_addr: &UnixSocketAddrBound,
+    remote_socket: Arc<UnixStreamSocket>,
+) -> Result<()> {
+    BACKLOG_TABLE.push_incoming(remote_addr, remote_socket)
 }

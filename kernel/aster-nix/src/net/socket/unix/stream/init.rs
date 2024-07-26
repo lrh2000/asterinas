@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use super::{connected::Connected, endpoint::Endpoint, listener::push_incoming};
+use super::{connected::Connected, endpoint::Endpoint, listener::push_incoming, UnixStreamSocket};
 use crate::{
     events::{IoEvents, Observer},
     fs::{
@@ -16,13 +16,15 @@ use crate::{
 pub(super) struct Init {
     addr: Option<UnixSocketAddrBound>,
     pollee: Pollee,
+    this: Weak<UnixStreamSocket>,
 }
 
 impl Init {
-    pub(super) fn new() -> Self {
+    pub(super) fn new(this: Weak<UnixStreamSocket>) -> Self {
         Self {
             addr: None,
             pollee: Pollee::new(IoEvents::empty()),
+            this,
         }
     }
 
@@ -44,13 +46,24 @@ impl Init {
         Ok(())
     }
 
-    pub(super) fn connect(&self, remote_addr: &UnixSocketAddrBound) -> Result<Connected> {
-        let (this_end, remote_end) =
-            Endpoint::new_pair(self.addr.clone(), Some(remote_addr.clone()));
+    pub(super) fn connect(&self, remote_addr: UnixSocketAddrBound) -> Result<Connected> {
+        let (this_end, remote_end) = Endpoint::new_pair();
 
-        push_incoming(remote_addr, remote_end)?;
+        let remote_socket = Arc::new(UnixStreamSocket::new_connected(
+            Some(remote_addr.clone()),
+            self.this.clone(),
+            remote_end,
+            false,
+        ));
+        let remote_socket_weak = Arc::downgrade(&remote_socket);
 
-        Ok(Connected::new(this_end))
+        push_incoming(&remote_addr, remote_socket)?;
+
+        Ok(Connected::new(
+            self.addr.clone(),
+            remote_socket_weak,
+            this_end,
+        ))
     }
 
     pub(super) fn addr(&self) -> Option<&UnixSocketAddrBound> {

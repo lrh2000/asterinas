@@ -3,48 +3,31 @@
 use crate::{
     events::{IoEvents, Observer},
     fs::utils::{Channel, Consumer, Producer},
-    net::socket::{unix::addr::UnixSocketAddrBound, SockShutdownCmd},
+    net::socket::SockShutdownCmd,
     prelude::*,
     process::signal::Poller,
 };
 
 pub(super) struct Endpoint {
-    addr: Option<UnixSocketAddrBound>,
-    peer_addr: Option<UnixSocketAddrBound>,
     reader: Consumer<u8>,
     writer: Producer<u8>,
 }
 
 impl Endpoint {
-    pub(super) fn new_pair(
-        addr: Option<UnixSocketAddrBound>,
-        peer_addr: Option<UnixSocketAddrBound>,
-    ) -> (Endpoint, Endpoint) {
+    pub(super) fn new_pair() -> (Endpoint, Endpoint) {
         let (writer_this, reader_peer) = Channel::new(DAFAULT_BUF_SIZE).split();
         let (writer_peer, reader_this) = Channel::new(DAFAULT_BUF_SIZE).split();
 
         let this = Endpoint {
-            addr: addr.clone(),
-            peer_addr: peer_addr.clone(),
             reader: reader_this,
             writer: writer_this,
         };
         let peer = Endpoint {
-            addr: peer_addr,
-            peer_addr: addr,
             reader: reader_peer,
             writer: writer_peer,
         };
 
         (this, peer)
-    }
-
-    pub(super) fn addr(&self) -> Option<&UnixSocketAddrBound> {
-        self.addr.as_ref()
-    }
-
-    pub(super) fn peer_addr(&self) -> Option<&UnixSocketAddrBound> {
-        self.peer_addr.as_ref()
     }
 
     pub(super) fn try_read(&self, buf: &mut [u8]) -> Result<usize> {
