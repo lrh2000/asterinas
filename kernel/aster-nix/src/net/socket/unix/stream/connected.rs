@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use super::{endpoint::Endpoint, UnixStreamSocket};
+use super::{endpoint::Endpoint, init::create_socket_file, UnixStreamSocket};
 use crate::{
     events::{IoEvents, Observer},
-    net::socket::{unix::addr::UnixSocketAddrBound, SockShutdownCmd},
+    net::socket::{
+        unix::{addr::UnixSocketAddrBound, UnixSocketAddr},
+        SockShutdownCmd,
+    },
     prelude::*,
     process::signal::Poller,
 };
@@ -25,6 +28,28 @@ impl Connected {
             peer,
             local_endpoint,
         }
+    }
+
+    pub(super) fn bind(&mut self, addr_to_bind: UnixSocketAddr) -> Result<()> {
+        if self.addr.is_some() {
+            return_errno_with_message!(
+                Errno::EINVAL,
+                "the connected socket is already bound to an address"
+            );
+        }
+
+        // TODO: Move this logic to a separate file.
+        let bound_addr = match addr_to_bind {
+            UnixSocketAddr::Unnamed => todo!(),
+            UnixSocketAddr::Abstract(_) => todo!(),
+            UnixSocketAddr::Path(path) => {
+                let dentry = create_socket_file(&path)?;
+                UnixSocketAddrBound::Path(path, dentry)
+            }
+        };
+        self.addr = Some(bound_addr);
+
+        Ok(())
     }
 
     pub(super) fn addr(&self) -> Option<&UnixSocketAddrBound> {

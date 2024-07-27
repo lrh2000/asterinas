@@ -216,11 +216,13 @@ impl Socket for UnixStreamSocket {
 
         match &mut *self.state.write() {
             State::Init(init) => init.bind(addr),
-            _ => return_errno_with_message!(
-                Errno::EINVAL,
-                "cannot bind a listening or connected socket"
-            ),
-            // FIXME: Maybe binding a connected socket should also be allowed?
+            State::Connected(connected) => connected.bind(addr),
+            State::Listen(_) => {
+                return_errno_with_message!(
+                    Errno::EINVAL,
+                    "the listening socket is already bound to an address"
+                )
+            }
         }
     }
 

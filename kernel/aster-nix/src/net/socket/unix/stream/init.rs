@@ -30,9 +30,10 @@ impl Init {
 
     pub(super) fn bind(&mut self, addr_to_bind: UnixSocketAddr) -> Result<()> {
         if self.addr.is_some() {
-            return_errno_with_message!(Errno::EINVAL, "the socket is already bound");
+            return_errno_with_message!(Errno::EINVAL, "the socket is already bound to an address");
         }
 
+        // TODO: Move this logic to a separate file.
         let bound_addr = match addr_to_bind {
             UnixSocketAddr::Unnamed => todo!(),
             UnixSocketAddr::Abstract(_) => todo!(),
@@ -91,7 +92,8 @@ impl Init {
     }
 }
 
-fn create_socket_file(path: &str) -> Result<Arc<Dentry>> {
+// TODO: Move this logic to a separate file.
+pub(super) fn create_socket_file(path: &str) -> Result<Arc<Dentry>> {
     let (parent_pathname, file_name) = split_path(path);
     let parent = {
         let current = current!();
