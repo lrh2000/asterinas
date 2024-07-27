@@ -38,9 +38,7 @@ impl Endpoint {
         self.writer.try_write(buf)
     }
 
-    pub(super) fn shutdown(&self, cmd: SockShutdownCmd) -> Result<()> {
-        // FIXME: If the socket has already been shut down, should we return an error code?
-
+    pub(super) fn shutdown(&self, cmd: SockShutdownCmd) {
         if cmd.shut_read() {
             self.reader.shutdown();
         }
@@ -48,8 +46,6 @@ impl Endpoint {
         if cmd.shut_write() {
             self.writer.shutdown();
         }
-
-        Ok(())
     }
 
     pub(super) fn poll(&self, mask: IoEvents, mut poller: Option<&mut Poller>) -> IoEvents {

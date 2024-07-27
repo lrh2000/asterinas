@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
+use core::sync::atomic::{AtomicBool, Ordering};
+
 use super::{
     connected::Connected,
     endpoint::Endpoint,
@@ -8,7 +10,10 @@ use super::{
 };
 use crate::{
     events::{IoEvents, Observer},
-    net::socket::unix::addr::{UnixSocketAddr, UnixSocketAddrBound, UnixSocketAddrKey},
+    net::socket::{
+        unix::addr::{UnixSocketAddr, UnixSocketAddrBound, UnixSocketAddrKey},
+        SockShutdownCmd,
+    },
     prelude::*,
     process::signal::{Pollee, Poller},
 };
@@ -17,6 +22,8 @@ pub(super) struct Init {
     addr: Option<UnixSocketAddrBound>,
     pollee: Pollee,
     this: Weak<UnixStreamSocket>,
+    is_read_shutdown: AtomicBool,
+    is_write_shutdown: AtomicBool,
 }
 
 impl Init {
@@ -25,6 +32,8 @@ impl Init {
             addr: None,
             pollee: Pollee::new(IoEvents::empty()),
             this,
+            is_read_shutdown: AtomicBool::new(false),
+            is_write_shutdown: AtomicBool::new(false),
         }
     }
 
@@ -59,6 +68,13 @@ impl Init {
             Err(err) => return Err((err, self)),
         };
 
+        if self.is_read_shutdown.into_inner() {
+            this_end.shutdown(SockShutdownCmd::SHUT_RD);
+        }
+        if self.is_write_shutdown.into_inner() {
+            this_end.shutdown(SockShutdownCmd::SHUT_WR);
+        }
+
         Ok(Connected::new(
             self.addr,
             Some(self.pollee),
@@ -75,7 +91,23 @@ impl Init {
             ));
         };
 
-        Ok(Listener::new(addr, self.pollee, backlog))
+        Ok(Listener::new(
+            addr,
+            self.pollee,
+            backlog,
+            self.is_read_shutdown.into_inner(),
+        ))
+    }
+
+    pub(super) fn shutdown(&self, cmd: SockShutdownCmd) {
+        match cmd {
+            SockShutdownCmd::SHUT_RD => self.is_read_shutdown.store(true, Ordering::Relaxed),
+            SockShutdownCmd::SHUT_WR => self.is_write_shutdown.store(true, Ordering::Relaxed),
+            SockShutdownCmd::SHUT_RDWR => {
+                self.is_read_shutdown.store(true, Ordering::Relaxed);
+                self.is_write_shutdown.store(true, Ordering::Relaxed);
+            }
+        }
     }
 
     pub(super) fn addr(&self) -> Option<&UnixSocketAddrBound> {

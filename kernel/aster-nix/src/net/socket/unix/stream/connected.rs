@@ -65,7 +65,7 @@ impl Connected {
         self.local_endpoint.try_read(buf)
     }
 
-    pub(super) fn shutdown(&self, cmd: SockShutdownCmd) -> Result<()> {
+    pub(super) fn shutdown(&self, cmd: SockShutdownCmd) {
         self.local_endpoint.shutdown(cmd)
     }
 

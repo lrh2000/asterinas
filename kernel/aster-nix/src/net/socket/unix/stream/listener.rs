@@ -3,7 +3,10 @@
 use super::UnixStreamSocket;
 use crate::{
     events::{IoEvents, Observer},
-    net::socket::unix::addr::{UnixSocketAddrBound, UnixSocketAddrKey},
+    net::socket::{
+        unix::addr::{UnixSocketAddrBound, UnixSocketAddrKey},
+        SockShutdownCmd,
+    },
     prelude::*,
     process::signal::{Pollee, Poller},
 };
@@ -13,8 +16,15 @@ pub(super) struct Listener {
 }
 
 impl Listener {
-    pub(super) fn new(addr: UnixSocketAddrBound, pollee: Pollee, backlog: usize) -> Self {
-        let backlog = BACKLOG_TABLE.add_backlog(addr, pollee, backlog).unwrap();
+    pub(super) fn new(
+        addr: UnixSocketAddrBound,
+        pollee: Pollee,
+        backlog: usize,
+        is_shutdown: bool,
+    ) -> Self {
+        let backlog = BACKLOG_TABLE
+            .add_backlog(addr, pollee, backlog, is_shutdown)
+            .unwrap();
         Self { backlog }
     }
 
@@ -24,6 +34,13 @@ impl Listener {
 
     pub(super) fn try_accept(&self) -> Result<Arc<UnixStreamSocket>> {
         self.backlog.pop_incoming()
+    }
+
+    pub(super) fn shutdown(&self, cmd: SockShutdownCmd) {
+        match cmd {
+            SockShutdownCmd::SHUT_RD | SockShutdownCmd::SHUT_RDWR => self.backlog.shutdown(),
+            SockShutdownCmd::SHUT_WR => (),
+        }
     }
 
     pub(super) fn poll(&self, mask: IoEvents, poller: Option<&mut Poller>) -> IoEvents {
@@ -70,9 +87,10 @@ impl BacklogTable {
         addr: UnixSocketAddrBound,
         pollee: Pollee,
         backlog: usize,
+        is_shutdown: bool,
     ) -> Option<Arc<Backlog>> {
         let addr_key = addr.to_key();
-        let new_backlog = Arc::new(Backlog::new(addr, pollee, backlog));
+        let new_backlog = Arc::new(Backlog::new(addr, pollee, backlog, is_shutdown));
 
         let mut backlog_sockets = self.backlog_sockets.write();
         if backlog_sockets.contains_key(&addr_key) {
@@ -119,18 +137,24 @@ struct Backlog {
     addr: UnixSocketAddrBound,
     pollee: Pollee,
     backlog: usize,
-    incoming_sockets: Mutex<VecDeque<Arc<UnixStreamSocket>>>,
+    incoming_sockets: Mutex<Option<VecDeque<Arc<UnixStreamSocket>>>>,
 }
 
 impl Backlog {
-    fn new(addr: UnixSocketAddrBound, pollee: Pollee, backlog: usize) -> Self {
+    fn new(addr: UnixSocketAddrBound, pollee: Pollee, backlog: usize, is_shutdown: bool) -> Self {
         pollee.reset_events();
+
+        let incoming_sockets = if is_shutdown {
+            Some(VecDeque::with_capacity(backlog))
+        } else {
+            None
+        };
 
         Self {
             addr,
             pollee,
             backlog,
-            incoming_sockets: Mutex::new(VecDeque::with_capacity(backlog)),
+            incoming_sockets: Mutex::new(incoming_sockets),
         }
     }
 
@@ -139,28 +163,49 @@ impl Backlog {
     }
 
     fn push_incoming(&self, socket: Arc<UnixStreamSocket>) -> Result<()> {
-        let mut sockets = self.incoming_sockets.lock();
+        let mut state = self.incoming_sockets.lock();
+
+        let Some(sockets) = &mut *state else {
+            return_errno_with_message!(
+                Errno::ECONNREFUSED,
+                "the listening socket is shut down for reading"
+            );
+        };
+
         if sockets.len() >= self.backlog {
             return_errno_with_message!(Errno::ECONNREFUSED, "incoming_sockets is full");
         }
+
         sockets.push_back(socket);
         self.pollee.add_events(IoEvents::IN);
+
         Ok(())
     }
 
     fn pop_incoming(&self) -> Result<Arc<UnixStreamSocket>> {
-        let mut incoming_sockets = self.incoming_sockets.lock();
-        let socket = incoming_sockets.pop_front();
-        if incoming_sockets.is_empty() {
+        let mut state = self.incoming_sockets.lock();
+
+        let Some(sockets) = &mut *state else {
+            return_errno_with_message!(Errno::EINVAL, "the socket is shut down for reading");
+        };
+
+        let socket = sockets.pop_front();
+        if sockets.is_empty() {
             self.pollee.del_events(IoEvents::IN);
         }
+
         socket
             .ok_or_else(|| Error::with_message(Errno::EAGAIN, "no pending connection is available"))
     }
 
+    fn shutdown(&self) {
+        let mut state = self.incoming_sockets.lock();
+
+        *state = None;
+        self.pollee.del_events(IoEvents::IN);
+    }
+
     fn poll(&self, mask: IoEvents, poller: Option<&mut Poller>) -> IoEvents {
-        // Lock to avoid any events may change pollee state when we poll
-        let _lock = self.incoming_sockets.lock();
         self.pollee.poll(mask, poller)
     }
 
