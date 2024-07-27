@@ -13,9 +13,9 @@ pub(super) struct Listener {
 }
 
 impl Listener {
-    pub(super) fn new(addr: UnixSocketAddrBound, backlog: usize) -> Result<Self> {
-        let backlog = BACKLOG_TABLE.add_backlog(addr, backlog)?;
-        Ok(Self { backlog })
+    pub(super) fn new(addr: UnixSocketAddrBound, pollee: Pollee, backlog: usize) -> Self {
+        let backlog = BACKLOG_TABLE.add_backlog(addr, pollee, backlog).unwrap();
+        Self { backlog }
     }
 
     pub(super) fn addr(&self) -> &UnixSocketAddrBound {
@@ -65,16 +65,23 @@ impl BacklogTable {
         }
     }
 
-    fn add_backlog(&self, addr: UnixSocketAddrBound, backlog: usize) -> Result<Arc<Backlog>> {
+    fn add_backlog(
+        &self,
+        addr: UnixSocketAddrBound,
+        pollee: Pollee,
+        backlog: usize,
+    ) -> Option<Arc<Backlog>> {
         let addr_key = addr.to_key();
+        let new_backlog = Arc::new(Backlog::new(addr, pollee, backlog));
 
         let mut backlog_sockets = self.backlog_sockets.write();
         if backlog_sockets.contains_key(&addr_key) {
-            return_errno_with_message!(Errno::EADDRINUSE, "the addr is already used");
+            return None;
         }
-        let new_backlog = Arc::new(Backlog::new(addr, backlog));
         backlog_sockets.insert(addr_key, new_backlog.clone());
-        Ok(new_backlog)
+        drop(backlog_sockets);
+
+        Some(new_backlog)
     }
 
     fn get_backlog(&self, addr_key: &UnixSocketAddrKey) -> Result<Arc<Backlog>> {
@@ -116,10 +123,12 @@ struct Backlog {
 }
 
 impl Backlog {
-    fn new(addr: UnixSocketAddrBound, backlog: usize) -> Self {
+    fn new(addr: UnixSocketAddrBound, pollee: Pollee, backlog: usize) -> Self {
+        pollee.reset_events();
+
         Self {
             addr,
-            pollee: Pollee::new(IoEvents::empty()),
+            pollee,
             backlog,
             incoming_sockets: Mutex::new(VecDeque::with_capacity(backlog)),
         }

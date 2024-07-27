@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use super::{connected::Connected, endpoint::Endpoint, listener::push_incoming, UnixStreamSocket};
+use super::{
+    connected::Connected,
+    endpoint::Endpoint,
+    listener::{push_incoming, Listener},
+    UnixStreamSocket,
+};
 use crate::{
     events::{IoEvents, Observer},
     net::socket::unix::addr::{UnixSocketAddr, UnixSocketAddrBound, UnixSocketAddrKey},
@@ -34,23 +39,43 @@ impl Init {
         Ok(())
     }
 
-    pub(super) fn connect(&self, remote_addr: UnixSocketAddrKey) -> Result<Connected> {
+    pub(super) fn connect(
+        self,
+        remote_addr: UnixSocketAddrKey,
+    ) -> core::result::Result<Connected, (Error, Self)> {
         let (this_end, remote_end) = Endpoint::new_pair();
 
-        let remote_socket = push_incoming(&remote_addr, |real_remote_addr| {
+        let this = self.this.clone();
+
+        let remote_socket = match push_incoming(&remote_addr, |real_remote_addr| {
             Arc::new(UnixStreamSocket::new_connected(
                 Some(real_remote_addr.clone()),
-                self.this.clone(),
+                this,
                 remote_end,
                 false,
             ))
-        })?;
+        }) {
+            Ok(remote_socket) => remote_socket,
+            Err(err) => return Err((err, self)),
+        };
 
         Ok(Connected::new(
-            self.addr.clone(),
+            self.addr,
+            Some(self.pollee),
             Arc::downgrade(&remote_socket),
             this_end,
         ))
+    }
+
+    pub(super) fn listen(self, backlog: usize) -> core::result::Result<Listener, (Error, Self)> {
+        let Some(addr) = self.addr else {
+            return Err((
+                Error::with_message(Errno::EINVAL, "the socket is not bound"),
+                self,
+            ));
+        };
+
+        Ok(Listener::new(addr, self.pollee, backlog))
     }
 
     pub(super) fn addr(&self) -> Option<&UnixSocketAddrBound> {

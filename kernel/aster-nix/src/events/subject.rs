@@ -84,6 +84,10 @@ impl<E: Events, F: EventsFilter<E>> Subject<E, F> {
             }
         });
     }
+
+    pub fn into_observers(self) -> BTreeMap<KeyableWeak<dyn Observer<E>>, F> {
+        core::mem::take(&mut *self.observers.lock())
+    }
 }
 
 impl<E: Events> Default for Subject<E> {

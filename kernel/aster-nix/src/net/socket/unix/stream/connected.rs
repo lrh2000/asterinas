@@ -8,7 +8,7 @@ use crate::{
         SockShutdownCmd,
     },
     prelude::*,
-    process::signal::Poller,
+    process::signal::{Pollee, Poller},
 };
 
 pub(super) struct Connected {
@@ -20,9 +20,14 @@ pub(super) struct Connected {
 impl Connected {
     pub(super) fn new(
         addr: Option<UnixSocketAddrBound>,
+        old_pollee: Option<Pollee>,
         peer: Weak<UnixStreamSocket>,
         local_endpoint: Endpoint,
     ) -> Self {
+        if let Some(pollee) = old_pollee {
+            local_endpoint.absorb_pollee(pollee);
+        }
+
         Connected {
             addr,
             peer,

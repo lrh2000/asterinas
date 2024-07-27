@@ -5,7 +5,7 @@ use crate::{
     fs::utils::{Channel, Consumer, Producer},
     net::socket::SockShutdownCmd,
     prelude::*,
-    process::signal::Poller,
+    process::signal::{Pollee, Poller},
 };
 
 pub(super) struct Endpoint {
@@ -101,6 +101,17 @@ impl Endpoint {
             observer1
         } else {
             None
+        }
+    }
+
+    pub(super) fn absorb_pollee(&self, pollee: Pollee) {
+        for (observer, mask) in pollee.into_observers() {
+            let Some(strong_observer) = observer.upgrade() else {
+                continue;
+            };
+
+            self.register_observer(observer.into(), mask).unwrap();
+            strong_observer.on_events(&mask);
         }
     }
 }

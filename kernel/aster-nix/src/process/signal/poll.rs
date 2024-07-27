@@ -5,6 +5,8 @@ use core::{
     time::Duration,
 };
 
+use keyable_arc::KeyableWeak;
+
 use crate::{
     events::{IoEvents, Observer, Subject},
     prelude::*,
@@ -13,7 +15,6 @@ use crate::{
 
 /// A pollee maintains a set of active events, which can be polled with
 /// pollers or be monitored with observers.
-#[derive(Clone)]
 pub struct Pollee {
     inner: Arc<PolleeInner>,
 }
@@ -123,6 +124,13 @@ impl Pollee {
         self.inner
             .events
             .fetch_and(!IoEvents::all().bits(), Ordering::Release);
+    }
+
+    pub fn into_observers(self) -> BTreeMap<KeyableWeak<dyn Observer<IoEvents>>, IoEvents> {
+        Arc::into_inner(self.inner)
+            .unwrap()
+            .subject
+            .into_observers()
     }
 
     fn events(&self) -> IoEvents {
