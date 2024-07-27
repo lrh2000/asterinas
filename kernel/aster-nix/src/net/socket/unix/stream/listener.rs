@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
+use core::sync::atomic::{AtomicUsize, Ordering};
+
 use super::UnixStreamSocket;
 use crate::{
     events::{IoEvents, Observer},
@@ -34,6 +36,10 @@ impl Listener {
 
     pub(super) fn try_accept(&self) -> Result<Arc<UnixStreamSocket>> {
         self.backlog.pop_incoming()
+    }
+
+    pub(super) fn listen(&self, backlog: usize) {
+        self.backlog.set_backlog(backlog);
     }
 
     pub(super) fn shutdown(&self, cmd: SockShutdownCmd) {
@@ -136,7 +142,7 @@ impl BacklogTable {
 struct Backlog {
     addr: UnixSocketAddrBound,
     pollee: Pollee,
-    backlog: usize,
+    backlog: AtomicUsize,
     incoming_sockets: Mutex<Option<VecDeque<Arc<UnixStreamSocket>>>>,
 }
 
@@ -153,7 +159,7 @@ impl Backlog {
         Self {
             addr,
             pollee,
-            backlog,
+            backlog: AtomicUsize::new(backlog),
             incoming_sockets: Mutex::new(incoming_sockets),
         }
     }
@@ -172,8 +178,11 @@ impl Backlog {
             );
         };
 
-        if sockets.len() >= self.backlog {
-            return_errno_with_message!(Errno::ECONNREFUSED, "incoming_sockets is full");
+        if sockets.len() >= self.backlog.load(Ordering::Relaxed) {
+            return_errno_with_message!(
+                Errno::ECONNREFUSED,
+                "the pending connection queue on the listening socket is full"
+            );
         }
 
         sockets.push_back(socket);
@@ -196,6 +205,10 @@ impl Backlog {
 
         socket
             .ok_or_else(|| Error::with_message(Errno::EAGAIN, "no pending connection is available"))
+    }
+
+    fn set_backlog(&self, backlog: usize) {
+        self.backlog.store(backlog, Ordering::Relaxed);
     }
 
     fn shutdown(&self) {

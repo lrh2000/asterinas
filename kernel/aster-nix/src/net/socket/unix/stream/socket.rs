@@ -266,13 +266,8 @@ impl Socket for UnixStreamSocket {
             let init = match owned_state {
                 State::Init(init) => init,
                 State::Listen(listener) => {
-                    return (
-                        State::Listen(listener),
-                        Err(Error::with_message(
-                            Errno::EINVAL,
-                            "the socket is listening",
-                        )),
-                    );
+                    listener.listen(backlog);
+                    return (State::Listen(listener), Ok(()));
                 }
                 State::Connected(connected) => {
                     return (
