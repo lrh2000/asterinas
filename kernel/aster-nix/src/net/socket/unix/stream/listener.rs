@@ -104,8 +104,8 @@ impl BacklogTable {
     fn push_incoming(
         &self,
         addr: &UnixSocketAddrBound,
-        socket: Arc<UnixStreamSocket>,
-    ) -> Result<()> {
+        socket_creator: impl FnOnce(&UnixSocketAddrBound) -> Arc<UnixStreamSocket>,
+    ) -> Result<Arc<UnixStreamSocket>> {
         let backlog = self.get_backlog(addr).map_err(|_| {
             Error::with_message(
                 Errno::ECONNREFUSED,
@@ -113,7 +113,10 @@ impl BacklogTable {
             )
         })?;
 
-        backlog.push_incoming(socket)
+        let socket = socket_creator(backlog.addr());
+        backlog.push_incoming(socket.clone())?;
+
+        Ok(socket)
     }
 
     fn remove_backlog(&self, addr: &UnixSocketAddrBound) {
@@ -197,7 +200,7 @@ fn create_keyable_inode(dentry: &Arc<Dentry>) -> KeyableWeak<dyn Inode> {
 
 pub(super) fn push_incoming(
     remote_addr: &UnixSocketAddrBound,
-    remote_socket: Arc<UnixStreamSocket>,
-) -> Result<()> {
-    BACKLOG_TABLE.push_incoming(remote_addr, remote_socket)
+    remote_socket_creator: impl FnOnce(&UnixSocketAddrBound) -> Arc<UnixStreamSocket>,
+) -> Result<Arc<UnixStreamSocket>> {
+    BACKLOG_TABLE.push_incoming(remote_addr, remote_socket_creator)
 }

@@ -50,19 +50,18 @@ impl Init {
     pub(super) fn connect(&self, remote_addr: UnixSocketAddrBound) -> Result<Connected> {
         let (this_end, remote_end) = Endpoint::new_pair();
 
-        let remote_socket = Arc::new(UnixStreamSocket::new_connected(
-            Some(remote_addr.clone()),
-            self.this.clone(),
-            remote_end,
-            false,
-        ));
-        let remote_socket_weak = Arc::downgrade(&remote_socket);
-
-        push_incoming(&remote_addr, remote_socket)?;
+        let remote_socket = push_incoming(&remote_addr, |real_remote_addr| {
+            Arc::new(UnixStreamSocket::new_connected(
+                Some(real_remote_addr.clone()),
+                self.this.clone(),
+                remote_end,
+                false,
+            ))
+        })?;
 
         Ok(Connected::new(
             self.addr.clone(),
-            remote_socket_weak,
+            Arc::downgrade(&remote_socket),
             this_end,
         ))
     }
