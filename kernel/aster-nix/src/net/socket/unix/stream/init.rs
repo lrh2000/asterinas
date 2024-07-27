@@ -3,12 +3,7 @@
 use super::{connected::Connected, endpoint::Endpoint, listener::push_incoming, UnixStreamSocket};
 use crate::{
     events::{IoEvents, Observer},
-    fs::{
-        fs_resolver::{split_path, FsPath},
-        path::Dentry,
-        utils::{InodeMode, InodeType},
-    },
-    net::socket::unix::addr::{UnixSocketAddr, UnixSocketAddrBound},
+    net::socket::unix::addr::{UnixSocketAddr, UnixSocketAddrBound, UnixSocketAddrKey},
     prelude::*,
     process::signal::{Pollee, Poller},
 };
@@ -33,21 +28,13 @@ impl Init {
             return_errno_with_message!(Errno::EINVAL, "the socket is already bound to an address");
         }
 
-        // TODO: Move this logic to a separate file.
-        let bound_addr = match addr_to_bind {
-            UnixSocketAddr::Unnamed => todo!(),
-            UnixSocketAddr::Abstract(_) => todo!(),
-            UnixSocketAddr::Path(path) => {
-                let dentry = create_socket_file(&path)?;
-                UnixSocketAddrBound::Path(path, dentry)
-            }
-        };
+        let bound_addr = addr_to_bind.bind()?;
         self.addr = Some(bound_addr);
 
         Ok(())
     }
 
-    pub(super) fn connect(&self, remote_addr: UnixSocketAddrBound) -> Result<Connected> {
+    pub(super) fn connect(&self, remote_addr: UnixSocketAddrKey) -> Result<Connected> {
         let (this_end, remote_end) = Endpoint::new_pair();
 
         let remote_socket = push_incoming(&remote_addr, |real_remote_addr| {
@@ -89,21 +76,4 @@ impl Init {
     ) -> Option<Weak<dyn Observer<IoEvents>>> {
         self.pollee.unregister_observer(observer)
     }
-}
-
-// TODO: Move this logic to a separate file.
-pub(super) fn create_socket_file(path: &str) -> Result<Arc<Dentry>> {
-    let (parent_pathname, file_name) = split_path(path);
-    let parent = {
-        let current = current!();
-        let fs = current.fs().read();
-        let parent_path = FsPath::try_from(parent_pathname)?;
-        fs.lookup(&parent_path)?
-    };
-    let dentry = parent.new_fs_child(
-        file_name,
-        InodeType::Socket,
-        InodeMode::S_IRUSR | InodeMode::S_IWUSR,
-    )?;
-    Ok(dentry)
 }

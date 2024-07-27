@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use super::{endpoint::Endpoint, init::create_socket_file, UnixStreamSocket};
+use super::{endpoint::Endpoint, UnixStreamSocket};
 use crate::{
     events::{IoEvents, Observer},
     net::socket::{
@@ -38,15 +38,7 @@ impl Connected {
             );
         }
 
-        // TODO: Move this logic to a separate file.
-        let bound_addr = match addr_to_bind {
-            UnixSocketAddr::Unnamed => todo!(),
-            UnixSocketAddr::Abstract(_) => todo!(),
-            UnixSocketAddr::Path(path) => {
-                let dentry = create_socket_file(&path)?;
-                UnixSocketAddrBound::Path(path, dentry)
-            }
-        };
+        let bound_addr = addr_to_bind.bind()?;
         self.addr = Some(bound_addr);
 
         Ok(())

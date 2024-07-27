@@ -1,12 +1,9 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use keyable_arc::KeyableWeak;
-
 use super::UnixStreamSocket;
 use crate::{
     events::{IoEvents, Observer},
-    fs::{path::Dentry, utils::Inode},
-    net::socket::unix::addr::UnixSocketAddrBound,
+    net::socket::unix::addr::{UnixSocketAddrBound, UnixSocketAddrKey},
     prelude::*,
     process::signal::{Pollee, Poller},
 };
@@ -51,15 +48,14 @@ impl Listener {
 
 impl Drop for Listener {
     fn drop(&mut self) {
-        BACKLOG_TABLE.remove_backlog(self.backlog.addr())
+        BACKLOG_TABLE.remove_backlog(&self.backlog.addr().to_key())
     }
 }
 
 static BACKLOG_TABLE: BacklogTable = BacklogTable::new();
 
 struct BacklogTable {
-    backlog_sockets: RwLock<BTreeMap<KeyableWeak<dyn Inode>, Arc<Backlog>>>,
-    // TODO: For linux, there is also abstract socket domain that a socket addr is not bound to an inode.
+    backlog_sockets: RwLock<BTreeMap<UnixSocketAddrKey, Arc<Backlog>>>,
 }
 
 impl BacklogTable {
@@ -70,43 +66,31 @@ impl BacklogTable {
     }
 
     fn add_backlog(&self, addr: UnixSocketAddrBound, backlog: usize) -> Result<Arc<Backlog>> {
-        let inode = {
-            let UnixSocketAddrBound::Path(_, ref dentry) = addr else {
-                todo!()
-            };
-            create_keyable_inode(dentry)
-        };
+        let addr_key = addr.to_key();
 
         let mut backlog_sockets = self.backlog_sockets.write();
-        if backlog_sockets.contains_key(&inode) {
+        if backlog_sockets.contains_key(&addr_key) {
             return_errno_with_message!(Errno::EADDRINUSE, "the addr is already used");
         }
         let new_backlog = Arc::new(Backlog::new(addr, backlog));
-        backlog_sockets.insert(inode, new_backlog.clone());
+        backlog_sockets.insert(addr_key, new_backlog.clone());
         Ok(new_backlog)
     }
 
-    fn get_backlog(&self, addr: &UnixSocketAddrBound) -> Result<Arc<Backlog>> {
-        let inode = {
-            let UnixSocketAddrBound::Path(_, dentry) = addr else {
-                todo!()
-            };
-            create_keyable_inode(dentry)
-        };
-
+    fn get_backlog(&self, addr_key: &UnixSocketAddrKey) -> Result<Arc<Backlog>> {
         let backlog_sockets = self.backlog_sockets.read();
         backlog_sockets
-            .get(&inode)
+            .get(addr_key)
             .map(Arc::clone)
             .ok_or_else(|| Error::with_message(Errno::EINVAL, "the socket is not listened"))
     }
 
     fn push_incoming(
         &self,
-        addr: &UnixSocketAddrBound,
+        addr_key: &UnixSocketAddrKey,
         socket_creator: impl FnOnce(&UnixSocketAddrBound) -> Arc<UnixStreamSocket>,
     ) -> Result<Arc<UnixStreamSocket>> {
-        let backlog = self.get_backlog(addr).map_err(|_| {
+        let backlog = self.get_backlog(addr_key).map_err(|_| {
             Error::with_message(
                 Errno::ECONNREFUSED,
                 "no socket is listened at the remote address",
@@ -119,13 +103,8 @@ impl BacklogTable {
         Ok(socket)
     }
 
-    fn remove_backlog(&self, addr: &UnixSocketAddrBound) {
-        let UnixSocketAddrBound::Path(_, dentry) = addr else {
-            todo!()
-        };
-
-        let inode = create_keyable_inode(dentry);
-        self.backlog_sockets.write().remove(&inode);
+    fn remove_backlog(&self, addr_key: &UnixSocketAddrKey) {
+        self.backlog_sockets.write().remove(addr_key);
     }
 }
 
@@ -193,14 +172,9 @@ impl Backlog {
     }
 }
 
-fn create_keyable_inode(dentry: &Arc<Dentry>) -> KeyableWeak<dyn Inode> {
-    let weak_inode = Arc::downgrade(dentry.inode());
-    KeyableWeak::from(weak_inode)
-}
-
 pub(super) fn push_incoming(
-    remote_addr: &UnixSocketAddrBound,
+    remote_addr_key: &UnixSocketAddrKey,
     remote_socket_creator: impl FnOnce(&UnixSocketAddrBound) -> Arc<UnixStreamSocket>,
 ) -> Result<Arc<UnixStreamSocket>> {
-    BACKLOG_TABLE.push_incoming(remote_addr, remote_socket_creator)
+    BACKLOG_TABLE.push_incoming(remote_addr_key, remote_socket_creator)
 }
