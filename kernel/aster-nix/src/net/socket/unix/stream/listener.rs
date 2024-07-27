@@ -108,25 +108,22 @@ impl BacklogTable {
         Some(new_backlog)
     }
 
-    fn get_backlog(&self, addr_key: &UnixSocketAddrKey) -> Result<Arc<Backlog>> {
-        let backlog_sockets = self.backlog_sockets.read();
-        backlog_sockets
-            .get(addr_key)
-            .map(Arc::clone)
-            .ok_or_else(|| Error::with_message(Errno::EINVAL, "the socket is not listened"))
-    }
-
     fn push_incoming(
         &self,
         addr_key: &UnixSocketAddrKey,
         socket_creator: impl FnOnce(&UnixSocketAddrBound) -> Arc<UnixStreamSocket>,
     ) -> Result<Arc<UnixStreamSocket>> {
-        let backlog = self.get_backlog(addr_key).map_err(|_| {
-            Error::with_message(
-                Errno::ECONNREFUSED,
-                "no socket is listened at the remote address",
-            )
-        })?;
+        let backlog = self
+            .backlog_sockets
+            .read()
+            .get(addr_key)
+            .cloned()
+            .ok_or_else(|| {
+                Error::with_message(
+                    Errno::ECONNREFUSED,
+                    "no socket is listening at the remote address",
+                )
+            })?;
 
         let socket = socket_creator(backlog.addr());
         backlog.push_incoming(socket.clone())?;
