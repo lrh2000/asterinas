@@ -59,15 +59,11 @@ pub struct Consumer<T>(Fifo<T, ReadOp>);
 macro_rules! impl_common_methods_for_channel {
     () => {
         pub fn shutdown(&self) {
-            self.this_end().shutdown()
+            self.0.common.shutdown()
         }
 
         pub fn is_shutdown(&self) -> bool {
-            self.this_end().is_shutdown()
-        }
-
-        pub fn is_peer_shutdown(&self) -> bool {
-            self.peer_end().is_shutdown()
+            self.0.common.is_shutdown()
         }
 
         pub fn poll(&self, mask: IoEvents, poller: Option<&mut Poller>) -> IoEvents {
@@ -109,7 +105,7 @@ impl<T> Producer<T> {
 
         let this_end = self.this_end();
         let rb = this_end.rb();
-        if self.is_shutdown() || self.is_peer_shutdown() {
+        if self.is_shutdown() {
             // The POLLOUT event is always set in this case. Don't try to remove it.
         } else if rb.is_full() {
             this_end.pollee.del_events(IoEvents::OUT);
@@ -139,7 +135,7 @@ impl<T: Copy> Producer<T> {
             return Ok(0);
         }
 
-        if self.is_shutdown() || self.is_peer_shutdown() {
+        if self.is_shutdown() {
             return_errno_with_message!(Errno::EPIPE, "the channel is shut down");
         }
 
@@ -161,7 +157,7 @@ impl<T> Producer<T> {
     /// - Returns `Err(EPIPE)` if the channel is shut down.
     /// - Returns `Err(EAGAIN)` if the channel is full.
     pub fn try_push(&self, item: T) -> core::result::Result<(), (Error, T)> {
-        if self.is_shutdown() || self.is_peer_shutdown() {
+        if self.is_shutdown() {
             let err = Error::with_message(Errno::EPIPE, "the channel is shut down");
             return Err((err, item));
         }
@@ -179,11 +175,6 @@ impl<T> Producer<T> {
 impl<T> Drop for Producer<T> {
     fn drop(&mut self) {
         self.shutdown();
-
-        // The POLLHUP event indicates that the write end is shut down.
-        //
-        // No need to take a lock. There is no race because no one is modifying this particular event.
-        self.peer_end().pollee.add_events(IoEvents::HUP);
     }
 }
 
@@ -232,7 +223,7 @@ impl<T: Copy> Consumer<T> {
         }
 
         // This must be recorded before the actual operation to avoid race conditions.
-        let is_shutdown = self.is_shutdown() || self.is_peer_shutdown();
+        let is_shutdown = self.is_shutdown();
 
         let read_len = self.0.read(buf);
         self.update_pollee();
@@ -255,7 +246,7 @@ impl<T> Consumer<T> {
     /// - Returns `Err(EAGAIN)` if the channel is empty.
     pub fn try_pop(&self) -> Result<Option<T>> {
         // This must be recorded before the actual operation to avoid race conditions.
-        let is_shutdown = self.is_shutdown() || self.is_peer_shutdown();
+        let is_shutdown = self.is_shutdown();
 
         let item = self.0.pop();
         self.update_pollee();
@@ -273,15 +264,6 @@ impl<T> Consumer<T> {
 impl<T> Drop for Consumer<T> {
     fn drop(&mut self) {
         self.shutdown();
-
-        // The POLLERR event indicates that the read end is closed (so any subsequent writes will
-        // fail with an `EPIPE` error).
-        //
-        // The lock is taken because we are also adding the POLLOUT event, which may have races
-        // with the event updates triggered by the writer.
-        let peer_end = self.peer_end();
-        let _rb = peer_end.rb();
-        peer_end.pollee.add_events(IoEvents::ERR | IoEvents::OUT);
     }
 }
 
@@ -334,28 +316,57 @@ impl<T, R: TRights> Fifo<T, R> {
 struct Common<T> {
     producer: FifoInner<HeapRbProducer<T>>,
     consumer: FifoInner<HeapRbConsumer<T>>,
+    is_shutdown: AtomicBool,
 }
 
 impl<T> Common<T> {
-    fn new(capacity: usize) -> Self {
+    pub fn new(capacity: usize) -> Self {
         let rb: HeapRb<T> = HeapRb::new(capacity);
         let (rb_producer, rb_consumer) = rb.split();
 
         let producer = FifoInner::new(rb_producer, IoEvents::OUT);
         let consumer = FifoInner::new(rb_consumer, IoEvents::empty());
 
-        Self { producer, consumer }
+        Self {
+            producer,
+            consumer,
+            is_shutdown: AtomicBool::new(false),
+        }
     }
 
     pub fn capacity(&self) -> usize {
         self.producer.rb().capacity()
+    }
+
+    pub fn is_shutdown(&self) -> bool {
+        self.is_shutdown.load(Ordering::Relaxed)
+    }
+
+    pub fn shutdown(&self) {
+        if self.is_shutdown.swap(true, Ordering::Relaxed) {
+            return;
+        }
+
+        // The POLLHUP event indicates that the write end is shut down.
+        //
+        // No need to take a lock. There is no race because no one is modifying this particular event.
+        self.consumer.pollee.add_events(IoEvents::HUP);
+
+        // The POLLERR event indicates that the read end is shut down (so any subsequent writes
+        // will fail with an `EPIPE` error).
+        //
+        // The lock is taken because we are also adding the POLLOUT event, which may have races
+        // with the event updates triggered by the writer.
+        let _rb = self.producer.rb();
+        self.producer
+            .pollee
+            .add_events(IoEvents::ERR | IoEvents::OUT);
     }
 }
 
 struct FifoInner<T> {
     rb: Mutex<T>,
     pollee: Pollee,
-    is_shutdown: AtomicBool,
 }
 
 impl<T> FifoInner<T> {
@@ -363,20 +374,11 @@ impl<T> FifoInner<T> {
         Self {
             rb: Mutex::new(rb),
             pollee: Pollee::new(init_events),
-            is_shutdown: AtomicBool::new(false),
         }
     }
 
     pub fn rb(&self) -> MutexGuard<T> {
         self.rb.lock()
-    }
-
-    pub fn is_shutdown(&self) -> bool {
-        self.is_shutdown.load(Ordering::Acquire)
-    }
-
-    pub fn shutdown(&self) {
-        self.is_shutdown.store(true, Ordering::Release)
     }
 }
 

@@ -49,20 +49,17 @@ impl Endpoint {
     }
 
     pub(super) fn poll(&self, mask: IoEvents, mut poller: Option<&mut Poller>) -> IoEvents {
-        let mut events = IoEvents::empty();
-
-        // FIXME: should reader and writer use the same mask?
         let reader_events = self.reader.poll(mask, poller.as_deref_mut());
         let writer_events = self.writer.poll(mask, poller);
 
-        // FIXME: Check this logic later.
-        if reader_events.contains(IoEvents::HUP) || self.reader.is_shutdown() {
+        let mut events = IoEvents::empty();
+
+        if reader_events.contains(IoEvents::HUP) {
             events |= IoEvents::RDHUP | IoEvents::IN;
-            if writer_events.contains(IoEvents::ERR) || self.writer.is_shutdown() {
-                events |= IoEvents::HUP | IoEvents::OUT;
+            if writer_events.contains(IoEvents::ERR) {
+                events |= IoEvents::HUP;
             }
         }
-
         events |= (reader_events & IoEvents::IN) | (writer_events & IoEvents::OUT);
 
         events
