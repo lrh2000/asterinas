@@ -59,7 +59,7 @@ impl Pollee {
     fn register_poller(&self, poller: &mut AnyPoller, mask: IoEvents) {
         self.inner
             .subject
-            .register_observer(poller.observer(), mask);
+            .register_observer(poller.observer.clone(), mask);
 
         poller.pollees.push(Arc::downgrade(&self.inner));
     }
@@ -126,31 +126,107 @@ impl Pollee {
     }
 }
 
-/// A poller gets notified when its associated pollees have interesting events.
-pub struct AnyPoller {
-    // Use event counter to wait or wake up a poller
-    event_counter: Arc<EventCounter>,
-    // All pollees that are interesting to this poller
-    pollees: Vec<Weak<PolleeInner>>,
-    // A waiter used to pause the current thread.
-    waiter: Waiter,
+/// A poller that is notified when its associated pollees have interesting events.
+///
+/// The observer type, `T`, should be a type that implements the [`Observer`] trait.
+pub struct Poller<T> {
+    // The event observer.
+    observer: Arc<T>,
+    // The inner with observer type erased.
+    inner: AnyPoller,
 }
 
-impl Default for AnyPoller {
-    fn default() -> Self {
-        Self::new()
+impl<T: Observer<IoEvents> + 'static> Poller<T> {
+    /// Constructs a new poller with the specified observer.
+    pub fn with_observer(observer: T) -> Self {
+        let observer = Arc::new(observer);
+        let inner = AnyPoller::new(Arc::downgrade(&observer) as _);
+
+        Self { observer, inner }
     }
 }
 
+impl<T> Poller<T> {
+    /// Gets a reference to the observer.
+    pub fn observer(&self) -> &Arc<T> {
+        &self.observer
+    }
+
+    /// Gets a mutable reference to the type-erased poller.
+    ///
+    /// See [`AnyPoller`] for more details.
+    pub fn as_dyn(&mut self) -> &mut AnyPoller {
+        &mut self.inner
+    }
+}
+
+/// A poller, but with the observer type erased.
+///
+/// This type is used to register the poller in [`Pollable::poll`]. The observer type is erased
+/// because the [`Pollable`] trait must be kept object-safe.
+pub struct AnyPoller {
+    // The event observer.
+    observer: Weak<dyn Observer<IoEvents>>,
+    // The associated pollees.
+    pollees: Vec<Weak<PolleeInner>>,
+}
+
 impl AnyPoller {
-    /// Constructs a new `AnyPoller`.
-    pub fn new() -> Self {
-        let (waiter, waker) = Waiter::new_pair();
+    /// Constructs a new poller with the observer.
+    ///
+    /// Note: It is a *logic error* to construct the multiple poller with the same observer (where
+    /// "same" means [`Weak::ptr_eq`]). If possible, consider using [`Poller::with_observer`]
+    /// instead.
+    pub fn new(observer: Weak<dyn Observer<IoEvents>>) -> Self {
         Self {
-            event_counter: Arc::new(EventCounter::new(waker)),
+            observer,
             pollees: Vec::new(),
+        }
+    }
+
+    /// Resets the poller.
+    ///
+    /// The observer will be unregistered and will no longer receive events.
+    pub fn reset(&mut self) {
+        let observer = &self.observer;
+
+        self.pollees
+            .iter()
+            .filter_map(Weak::upgrade)
+            .for_each(|pollee| {
+                pollee.subject.unregister_observer(observer);
+            });
+    }
+}
+
+impl Drop for AnyPoller {
+    fn drop(&mut self) {
+        self.reset();
+    }
+}
+
+/// A poller that can be used to wait for some events.
+pub struct WaitablePoller {
+    poller: Poller<EventCounter>,
+    waiter: Waiter,
+}
+
+impl WaitablePoller {
+    /// Constructs a new poller to wait for interesting events.
+    pub fn new() -> Self {
+        let (waiter, event_counter) = EventCounter::new_pair();
+
+        Self {
+            poller: Poller::with_observer(event_counter),
             waiter,
         }
+    }
+
+    /// Gets a mutable reference to the type-erased poller.
+    ///
+    /// See [`AnyPoller`] for more details.
+    pub fn as_dyn(&mut self) -> &mut AnyPoller {
+        self.poller.as_dyn()
     }
 
     /// Waits until some interesting events happen since the last wait or until the timeout
@@ -158,43 +234,30 @@ impl AnyPoller {
     ///
     /// The waiting process can be interrupted by a signal.
     pub fn wait(&self, timeout: Option<&Duration>) -> Result<()> {
-        self.event_counter.read(&self.waiter, timeout)?;
+        self.poller.observer().read(&self.waiter, timeout)?;
         Ok(())
     }
-
-    fn observer(&self) -> Weak<dyn Observer<IoEvents>> {
-        Arc::downgrade(&self.event_counter) as _
-    }
 }
 
-impl Drop for AnyPoller {
-    fn drop(&mut self) {
-        let observer = self.observer();
-
-        self.pollees
-            .iter()
-            .filter_map(Weak::upgrade)
-            .for_each(|pollee| {
-                pollee.subject.unregister_observer(&observer);
-            });
-    }
-}
-
-/// A counter for wait and wakeup.
 struct EventCounter {
     counter: AtomicUsize,
     waker: Arc<Waker>,
 }
 
 impl EventCounter {
-    pub fn new(waker: Arc<Waker>) -> Self {
-        Self {
-            counter: AtomicUsize::new(0),
-            waker,
-        }
+    fn new_pair() -> (Waiter, Self) {
+        let (waiter, waker) = Waiter::new_pair();
+
+        (
+            waiter,
+            Self {
+                counter: AtomicUsize::new(0),
+                waker,
+            },
+        )
     }
 
-    pub fn read(&self, waiter: &Waiter, timeout: Option<&Duration>) -> Result<usize> {
+    fn read(&self, waiter: &Waiter, timeout: Option<&Duration>) -> Result<usize> {
         let cond = || {
             let val = self.counter.swap(0, Ordering::Relaxed);
             if val > 0 {
@@ -211,7 +274,7 @@ impl EventCounter {
         }
     }
 
-    pub fn write(&self) {
+    fn write(&self) {
         self.counter.fetch_add(1, Ordering::Relaxed);
         self.waker.wake_up();
     }
@@ -274,8 +337,8 @@ pub trait Pollable {
         }
 
         // Wait until the event happens.
-        let mut poller = AnyPoller::new();
-        if self.poll(mask, Some(&mut poller)).is_empty() {
+        let mut poller = WaitablePoller::new();
+        if self.poll(mask, Some(poller.as_dyn())).is_empty() {
             poller.wait(timeout)?;
         }
 

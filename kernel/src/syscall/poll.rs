@@ -7,7 +7,7 @@ use crate::{
     events::IoEvents,
     fs::{file_handle::FileLike, file_table::FileDesc},
     prelude::*,
-    process::signal::AnyPoller,
+    process::signal::WaitablePoller,
 };
 
 pub fn sys_poll(fds: Vaddr, nfds: u64, timeout: i32, ctx: &Context) -> Result<SyscallReturn> {
@@ -106,20 +106,20 @@ fn hold_files(poll_fds: &[PollFd], ctx: &Context) -> Result<Vec<Option<Arc<dyn F
 }
 
 enum AnyPollerResult {
-    AllRegistered(AnyPoller),
+    AllRegistered(WaitablePoller),
     EventFoundAt(usize),
 }
 
 /// Registers the files with a poller, or exits early if some events are detected.
 fn register_poller(poll_fds: &[PollFd], files: &[Option<Arc<dyn FileLike>>]) -> AnyPollerResult {
-    let mut poller = AnyPoller::new();
+    let mut poller = WaitablePoller::new();
 
     for (i, (poll_fd, file)) in poll_fds.iter().zip(files.iter()).enumerate() {
         let Some(file) = file else {
             continue;
         };
 
-        let events = file.poll(poll_fd.events(), Some(&mut poller));
+        let events = file.poll(poll_fd.events(), Some(poller.as_dyn()));
         if events.is_empty() {
             continue;
         }
