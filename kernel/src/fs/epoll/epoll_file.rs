@@ -101,7 +101,7 @@ impl EpollFile {
             }
 
             let entry = EpollEntry::new(fd, Arc::downgrade(&file).into(), self.weak_self.clone());
-            let events = entry.update(ep_event, ep_flags)?;
+            let events = entry.update(ep_event, ep_flags);
 
             let ready_entry = if !events.is_empty() {
                 Some(entry.clone())
@@ -162,7 +162,7 @@ impl EpollFile {
                 .ok_or_else(|| {
                     Error::with_message(Errno::ENOENT, "the file is not in the interest list")
                 })?;
-            let events = entry.update(new_ep_event, new_ep_flags)?;
+            let events = entry.update(new_ep_event, new_ep_flags);
 
             if !events.is_empty() {
                 Some(entry.clone())
@@ -404,18 +404,7 @@ impl From<(FileDesc, &Arc<dyn FileLike>)> for EpollEntryKey {
 struct EpollEntryInner {
     event: EpollEvent,
     flags: EpollFlags,
-}
-
-impl Default for EpollEntryInner {
-    fn default() -> Self {
-        Self {
-            event: EpollEvent {
-                events: IoEvents::empty(),
-                user_data: 0,
-            },
-            flags: EpollFlags::empty(),
-        }
-    }
+    poller: AnyPoller,
 }
 
 impl EpollEntry {
@@ -425,13 +414,24 @@ impl EpollEntry {
         file: KeyableWeak<dyn FileLike>,
         weak_epoll: Weak<EpollFile>,
     ) -> Arc<Self> {
-        Arc::new_cyclic(|me| Self {
-            key: EpollEntryKey { fd, file },
-            inner: Mutex::new(EpollEntryInner::default()),
-            is_enabled: AtomicBool::new(false),
-            is_ready: AtomicBool::new(false),
-            weak_epoll,
-            weak_self: me.clone(),
+        Arc::new_cyclic(|me| {
+            let inner = EpollEntryInner {
+                event: EpollEvent {
+                    events: IoEvents::empty(),
+                    user_data: 0,
+                },
+                flags: EpollFlags::empty(),
+                poller: AnyPoller::new(me.clone() as _),
+            };
+
+            Self {
+                key: EpollEntryKey { fd, file },
+                inner: Mutex::new(inner),
+                is_enabled: AtomicBool::new(false),
+                is_ready: AtomicBool::new(false),
+                weak_epoll,
+                weak_self: me.clone(),
+            }
         })
     }
 
@@ -501,30 +501,27 @@ impl EpollEntry {
     /// Updates the epoll entry by the given event masks and flags.
     ///
     /// This method needs to be called in response to `EpollCtl::Add` and `EpollCtl::Mod`.
-    pub fn update(&self, event: EpollEvent, flags: EpollFlags) -> Result<IoEvents> {
+    pub fn update(&self, event: EpollEvent, flags: EpollFlags) -> IoEvents {
         let file = self.file().unwrap();
 
         let mut inner = self.inner.lock();
 
-        file.register_observer(self.self_weak(), event.events)?;
-        *inner = EpollEntryInner { event, flags };
+        inner.event = event;
+        inner.flags = flags;
 
         self.set_enabled(&inner);
-        let events = file.poll(event.events, None);
 
-        Ok(events)
+        file.poll(event.events, Some(&mut inner.poller))
     }
 
     /// Shuts down the epoll entry.
     ///
     /// This method needs to be called in response to `EpollCtl::Del`.
     pub fn shutdown(&self) {
-        let inner = self.inner.lock();
+        let mut inner = self.inner.lock();
 
-        if let Some(file) = self.file() {
-            file.unregister_observer(&(self.self_weak() as _)).unwrap();
-        };
         self.reset_enabled(&inner);
+        inner.poller.reset();
     }
 
     /// Returns whether the epoll entry is in the ready list.
