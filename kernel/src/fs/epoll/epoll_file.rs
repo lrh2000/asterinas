@@ -341,22 +341,6 @@ impl FileLike for EpollFile {
     fn ioctl(&self, _cmd: IoctlCmd, _arg: usize) -> Result<i32> {
         return_errno_with_message!(Errno::EINVAL, "epoll files do not support ioctl");
     }
-
-    fn register_observer(
-        &self,
-        observer: Weak<dyn Observer<IoEvents>>,
-        mask: IoEvents,
-    ) -> Result<()> {
-        self.pollee.register_observer(observer, mask);
-        Ok(())
-    }
-
-    fn unregister_observer(
-        &self,
-        observer: &Weak<dyn Observer<IoEvents>>,
-    ) -> Option<Weak<dyn Observer<IoEvents>>> {
-        self.pollee.unregister_observer(observer)
-    }
 }
 
 /// An epoll entry that is contained in an epoll file.
