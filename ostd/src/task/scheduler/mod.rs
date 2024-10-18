@@ -124,7 +124,7 @@ where
 {
     reschedule(|local_rq: &mut dyn LocalRunQueue| {
         if has_woken() {
-            return ReschedAction::DoNothing;
+            return None;
         }
 
         // Note the race conditions: the current task may be woken after the above `has_woken`
@@ -137,11 +137,7 @@ where
         // schedulers are introduced.
 
         local_rq.update_current(UpdateFlags::Wait);
-        if let Some(next_task) = local_rq.pick_next(CurrentState::NeedSleep) {
-            return ReschedAction::SwitchTo(next_task.clone());
-        }
-
-        ReschedAction::Retry
+        local_rq.pick_next(CurrentState::NeedSleep)
     });
 }
 
@@ -191,52 +187,34 @@ fn set_need_preempt(cpu_id: u32) {
 ///
 /// This should only be called if the current is to exit.
 pub(super) fn exit_current() {
-    reschedule(|local_rq: &mut dyn LocalRunQueue| {
-        if let Some(next_task) = local_rq.pick_next(CurrentState::NeedSleep) {
-            ReschedAction::SwitchTo(next_task.clone())
-        } else {
-            ReschedAction::Retry
-        }
-    })
+    loop {
+        reschedule(|local_rq: &mut dyn LocalRunQueue| local_rq.pick_next(CurrentState::NeedSleep))
+    }
 }
 
 /// Yields execution.
 pub(super) fn yield_now() {
     reschedule(|local_rq| {
         local_rq.update_current(UpdateFlags::Yield);
-        if let Some(next_task) = local_rq.pick_next(CurrentState::Runnable) {
-            ReschedAction::SwitchTo(next_task.clone())
-        } else {
-            ReschedAction::DoNothing
-        }
+        local_rq.pick_next(CurrentState::Runnable)
     })
 }
 
-/// Do rescheduling by acting on the scheduling decision (`ReschedAction`) made by a
-/// user-given closure.
+/// Performs rescheduling by acting on the scheduling decision made by a user-given closure.
 ///
-/// The closure makes the scheduling decision by taking the local runqueue has its input.
+/// The closure makes the scheduling decision (i.e., to switch to the next task or to do nothing)
+/// by taking the local runqueue as its input.
 fn reschedule<F>(mut f: F)
 where
-    F: FnMut(&mut dyn LocalRunQueue) -> ReschedAction,
+    F: FnMut(&mut dyn LocalRunQueue) -> Option<&Arc<Task>>,
 {
-    let next_task = loop {
-        let mut action = ReschedAction::DoNothing;
-        SCHEDULER.get().unwrap().local_mut_rq_with(&mut |rq| {
-            action = f(rq);
-        });
+    let mut maybe_next_task = None;
+    SCHEDULER.get().unwrap().local_mut_rq_with(&mut |rq| {
+        maybe_next_task = f(rq).cloned();
+    });
 
-        match action {
-            ReschedAction::DoNothing => {
-                return;
-            }
-            ReschedAction::Retry => {
-                continue;
-            }
-            ReschedAction::SwitchTo(next_task) => {
-                break next_task;
-            }
-        };
+    let Some(next_task) = maybe_next_task else {
+        return;
     };
 
     // FIXME: At this point, we need to prevent the current task from being scheduled on another
@@ -245,14 +223,4 @@ where
 
     cpu_local::clear_need_preempt();
     processor::switch_to_task(next_task);
-}
-
-/// Possible actions of a rescheduling.
-enum ReschedAction {
-    /// Keep running current task and do nothing.
-    DoNothing,
-    /// Loop until finding a task to swap out the current.
-    Retry,
-    /// Switch to target task.
-    SwitchTo(Arc<Task>),
 }
