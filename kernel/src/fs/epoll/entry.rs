@@ -21,23 +21,23 @@ use crate::{
 /// Each epoll entry can be added, modified, or deleted by the `EpollCtl` command.
 pub(super) struct EpollEntry {
     // The file descriptor and the file.
-    key: EpollEntryKey,
+    key: EntryKey,
     // The event masks and flags.
     inner: Mutex<EpollEntryInner>,
     // The observer that receives events.
     //
     // Keep this in a separate `Arc` to avoid dropping `EpollEntry` in the observer callback, which
     // may cause deadlocks.
-    observer: Arc<EpollEntryObserver>,
+    observer: Arc<EntryObserver>,
 }
 
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
-pub(super) struct EpollEntryKey {
+pub(super) struct EntryKey {
     fd: FileDesc,
     file: KeyableWeak<dyn FileLike>,
 }
 
-impl From<(FileDesc, KeyableWeak<dyn FileLike>)> for EpollEntryKey {
+impl From<(FileDesc, KeyableWeak<dyn FileLike>)> for EntryKey {
     fn from(value: (FileDesc, KeyableWeak<dyn FileLike>)) -> Self {
         Self {
             fd: value.0,
@@ -46,7 +46,7 @@ impl From<(FileDesc, KeyableWeak<dyn FileLike>)> for EpollEntryKey {
     }
 }
 
-impl From<(FileDesc, &Arc<dyn FileLike>)> for EpollEntryKey {
+impl From<(FileDesc, &Arc<dyn FileLike>)> for EntryKey {
     fn from(value: (FileDesc, &Arc<dyn FileLike>)) -> Self {
         Self {
             fd: value.0,
@@ -69,7 +69,7 @@ impl EpollEntry {
         ready_set: Arc<ReadySet>,
     ) -> Arc<Self> {
         Arc::new_cyclic(|me| {
-            let observer = Arc::new(EpollEntryObserver::new(ready_set, me.clone()));
+            let observer = Arc::new(EntryObserver::new(ready_set, me.clone()));
 
             let inner = EpollEntryInner {
                 event: EpollEvent {
@@ -81,7 +81,7 @@ impl EpollEntry {
             };
 
             Self {
-                key: EpollEntryKey { fd, file },
+                key: EntryKey { fd, file },
                 inner: Mutex::new(inner),
                 observer,
             }
@@ -163,12 +163,12 @@ impl EpollEntry {
     }
 
     /// Gets the underlying observer.
-    pub(super) fn observer(&self) -> &EpollEntryObserver {
+    pub(super) fn observer(&self) -> &EntryObserver {
         &self.observer
     }
 
     /// Gets the key associated with the epoll entry.
-    pub(super) fn key(&self) -> &EpollEntryKey {
+    pub(super) fn key(&self) -> &EntryKey {
         &self.key
     }
 
@@ -184,7 +184,7 @@ impl EpollEntry {
 }
 
 /// A observer for [`EpollEntry`] that can receive events.
-pub(super) struct EpollEntryObserver {
+pub(super) struct EntryObserver {
     // Whether the entry is enabled.
     is_enabled: AtomicBool,
     // Whether the entry is in the ready list.
@@ -195,7 +195,7 @@ pub(super) struct EpollEntryObserver {
     weak_entry: Weak<EpollEntry>,
 }
 
-impl EpollEntryObserver {
+impl EntryObserver {
     fn new(ready_set: Arc<ReadySet>, weak_entry: Weak<EpollEntry>) -> Self {
         Self {
             is_enabled: AtomicBool::new(false),
@@ -265,7 +265,7 @@ impl EpollEntryObserver {
     }
 }
 
-impl Observer<IoEvents> for EpollEntryObserver {
+impl Observer<IoEvents> for EntryObserver {
     fn on_events(&self, _events: &IoEvents) {
         self.ready_set.push(self);
     }
@@ -292,7 +292,7 @@ impl ReadySet {
         }
     }
 
-    pub(super) fn push(&self, observer: &EpollEntryObserver) {
+    pub(super) fn push(&self, observer: &EntryObserver) {
         // Note that we cannot take the `EpollEntryInner` lock because we are in the callback of
         // the event observer. Doing so will cause dead locks due to inconsistent locking orders.
         //
