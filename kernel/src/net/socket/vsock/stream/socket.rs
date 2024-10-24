@@ -11,7 +11,7 @@ use crate::{
         MessageHeader, SendRecvFlags, SockShutdownCmd, Socket, SocketAddr,
     },
     prelude::*,
-    process::signal::{Pollable, Poller},
+    process::signal::{AnyPoller, Pollable},
     util::{MultiRead, MultiWrite},
 };
 
@@ -128,7 +128,7 @@ impl VsockStreamSocket {
 }
 
 impl Pollable for VsockStreamSocket {
-    fn poll(&self, mask: IoEvents, poller: Option<&mut Poller>) -> IoEvents {
+    fn poll(&self, mask: IoEvents, poller: Option<&mut AnyPoller>) -> IoEvents {
         match &*self.status.read() {
             Status::Init(init) => init.poll(mask, poller),
             Status::Listen(listen) => listen.poll(mask, poller),
@@ -218,7 +218,7 @@ impl Socket for VsockStreamSocket {
         vsockspace.request(&connecting.info()).unwrap();
         // wait for response from driver
         // TODO: Add timeout
-        let mut poller = Poller::new();
+        let mut poller = AnyPoller::new();
         if !connecting
             .poll(IoEvents::IN, Some(&mut poller))
             .contains(IoEvents::IN)

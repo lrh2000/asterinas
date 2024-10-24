@@ -23,7 +23,7 @@ use crate::{
         },
     },
     prelude::*,
-    process::signal::{Pollable, Pollee, Poller},
+    process::signal::{AnyPoller, Pollable, Pollee},
     util::{MultiRead, MultiWrite},
 };
 
@@ -206,7 +206,7 @@ impl DatagramSocket {
 }
 
 impl Pollable for DatagramSocket {
-    fn poll(&self, mask: IoEvents, poller: Option<&mut Poller>) -> IoEvents {
+    fn poll(&self, mask: IoEvents, poller: Option<&mut AnyPoller>) -> IoEvents {
         self.pollee.poll(mask, poller)
     }
 }

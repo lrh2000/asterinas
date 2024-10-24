@@ -7,7 +7,7 @@ use crate::{
     events::IoEvents,
     fs::inode_handle::FileIo,
     prelude::*,
-    process::signal::{Pollable, Poller},
+    process::signal::{AnyPoller, Pollable},
 };
 
 pub struct Zero;
@@ -28,7 +28,7 @@ impl Device for Zero {
 }
 
 impl Pollable for Zero {
-    fn poll(&self, mask: IoEvents, poller: Option<&mut Poller>) -> IoEvents {
+    fn poll(&self, mask: IoEvents, poller: Option<&mut AnyPoller>) -> IoEvents {
         let events = IoEvents::IN | IoEvents::OUT;
         events & mask
     }

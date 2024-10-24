@@ -7,7 +7,7 @@ use crate::{
     events::IoEvents,
     fs::{file_handle::FileLike, file_table::FileDesc},
     prelude::*,
-    process::signal::Poller,
+    process::signal::AnyPoller,
 };
 
 pub fn sys_poll(fds: Vaddr, nfds: u64, timeout: i32, ctx: &Context) -> Result<SyscallReturn> {
@@ -59,8 +59,8 @@ pub fn do_poll(poll_fds: &[PollFd], timeout: Option<&Duration>, ctx: &Context) -
     let files = hold_files(poll_fds, ctx)?;
 
     let poller = match register_poller(poll_fds, files.as_ref()) {
-        PollerResult::AllRegistered(poller) => poller,
-        PollerResult::EventFoundAt(index) => {
+        AnyPollerResult::AllRegistered(poller) => poller,
+        AnyPollerResult::EventFoundAt(index) => {
             let next = index + 1;
             let remaining_events = count_all_events(&poll_fds[next..], &files[next..]);
             return Ok(1 + remaining_events);
@@ -105,14 +105,14 @@ fn hold_files(poll_fds: &[PollFd], ctx: &Context) -> Result<Vec<Option<Arc<dyn F
     Ok(files)
 }
 
-enum PollerResult {
-    AllRegistered(Poller),
+enum AnyPollerResult {
+    AllRegistered(AnyPoller),
     EventFoundAt(usize),
 }
 
 /// Registers the files with a poller, or exits early if some events are detected.
-fn register_poller(poll_fds: &[PollFd], files: &[Option<Arc<dyn FileLike>>]) -> PollerResult {
-    let mut poller = Poller::new();
+fn register_poller(poll_fds: &[PollFd], files: &[Option<Arc<dyn FileLike>>]) -> AnyPollerResult {
+    let mut poller = AnyPoller::new();
 
     for (i, (poll_fd, file)) in poll_fds.iter().zip(files.iter()).enumerate() {
         let Some(file) = file else {
@@ -125,10 +125,10 @@ fn register_poller(poll_fds: &[PollFd], files: &[Option<Arc<dyn FileLike>>]) -> 
         }
 
         poll_fd.revents().set(events);
-        return PollerResult::EventFoundAt(i);
+        return AnyPollerResult::EventFoundAt(i);
     }
 
-    PollerResult::AllRegistered(poller)
+    AnyPollerResult::AllRegistered(poller)
 }
 
 /// Counts the number of the ready files.

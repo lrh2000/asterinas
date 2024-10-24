@@ -13,7 +13,7 @@ use super::*;
 use crate::{
     events::Observer,
     fs::{file_handle::FileLike, utils::IoctlCmd},
-    process::signal::{Pollable, Pollee, Poller},
+    process::signal::{AnyPoller, Pollable, Pollee},
 };
 
 /// A file-like object that provides epoll API.
@@ -323,7 +323,7 @@ impl EpollFile {
 }
 
 impl Pollable for EpollFile {
-    fn poll(&self, mask: IoEvents, poller: Option<&mut Poller>) -> IoEvents {
+    fn poll(&self, mask: IoEvents, poller: Option<&mut AnyPoller>) -> IoEvents {
         self.pollee.poll(mask, poller)
     }
 }

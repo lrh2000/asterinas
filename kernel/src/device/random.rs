@@ -9,7 +9,7 @@ use crate::{
         inode_handle::FileIo,
     },
     prelude::*,
-    process::signal::{Pollable, Poller},
+    process::signal::{AnyPoller, Pollable},
     util::random::getrandom,
 };
 
@@ -38,7 +38,7 @@ impl Device for Random {
 }
 
 impl Pollable for Random {
-    fn poll(&self, mask: IoEvents, poller: Option<&mut Poller>) -> IoEvents {
+    fn poll(&self, mask: IoEvents, poller: Option<&mut AnyPoller>) -> IoEvents {
         let events = IoEvents::IN | IoEvents::OUT;
         events & mask
     }
