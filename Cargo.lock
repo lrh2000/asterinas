@@ -115,6 +115,7 @@ name = "aster-framebuffer"
 version = "0.1.0"
 dependencies = [
  "aster-console",
+ "aster-keyboard",
  "component",
  "log",
  "ostd",
@@ -127,6 +128,16 @@ version = "0.1.0"
 dependencies = [
  "component",
  "int-to-c-enum",
+ "ostd",
+ "spin",
+]
+
+[[package]]
+name = "aster-keyboard"
+version = "0.1.0"
+dependencies = [
+ "component",
+ "log",
  "ostd",
  "spin",
 ]

@@ -19,6 +19,7 @@ pub mod timer;
 pub mod trap;
 
 use cfg_if::cfg_if;
+use device::i8042_keyboard;
 use spin::Once;
 use x86::cpuid::{CpuId, FeatureInfo};
 
@@ -91,6 +92,7 @@ pub(crate) unsafe fn late_init_on_bsp() {
         }
     }
     serial::callback_init();
+    i8042_keyboard::init();
 
     kernel::tsc::init_tsc_freq();
     timer::init_bsp();
