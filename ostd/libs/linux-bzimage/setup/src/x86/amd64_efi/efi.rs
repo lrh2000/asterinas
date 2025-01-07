@@ -3,8 +3,11 @@
 use core::{ffi::CStr, mem::MaybeUninit};
 
 use boot::{open_protocol_exclusive, AllocateType};
-use linux_boot_params::BootParams;
-use uefi::{boot::exit_boot_services, mem::memory_map::MemoryMap, prelude::*};
+use linux_boot_params::{BootParams, ScreenInfo};
+use uefi::{
+    boot::exit_boot_services, mem::memory_map::MemoryMap, prelude::*,
+    proto::console::gop::GraphicsOutput,
+};
 use uefi_raw::table::system::SystemTable;
 
 use super::decoder::decode_payload;
