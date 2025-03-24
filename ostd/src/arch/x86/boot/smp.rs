@@ -44,6 +44,8 @@ use crate::{
 ///
 /// This function needs to be called after the OS initializes the ACPI table.
 pub(crate) fn get_num_processors() -> Option<u32> {
+    return Some(1);
+
     let acpi_tables = get_acpi_tables()?;
     let mut local_apic_counts = 0;
     acpi_tables

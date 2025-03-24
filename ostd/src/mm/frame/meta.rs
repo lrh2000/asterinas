@@ -53,6 +53,7 @@ use log::info;
 
 use crate::{
     arch::mm::PagingConsts,
+    boot::memory_region::MemoryRegionType,
     const_assert, if_tdx_enabled,
     mm::{
         frame::allocator::{self, EarlyAllocatedFrameMeta},
@@ -444,7 +445,12 @@ impl_frame_meta_for!(MetaPageMeta);
 pub(crate) unsafe fn init() -> Segment<MetaPageMeta> {
     let max_paddr = {
         let regions = &crate::boot::EARLY_INFO.get().unwrap().memory_regions;
-        regions.iter().map(|r| r.base() + r.len()).max().unwrap()
+        regions
+            .iter()
+            .filter(|r| r.typ() == MemoryRegionType::Usable)
+            .map(|r| r.base() + r.len())
+            .max()
+            .unwrap()
     };
 
     if_tdx_enabled!({
@@ -557,8 +563,9 @@ macro_rules! mark_ranges {
         debug_assert!($region.base() % PAGE_SIZE == 0);
         debug_assert!($region.len() % PAGE_SIZE == 0);
 
-        let seg = Segment::from_unused($region.base()..$region.end(), |_| $typ).unwrap();
-        let _ = ManuallyDrop::new(seg);
+        if let Ok(seg) = Segment::from_unused($region.base()..$region.end(), |_| $typ) {
+            let _ = ManuallyDrop::new(seg);
+        }
     }};
 }
 

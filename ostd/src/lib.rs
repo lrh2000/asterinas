@@ -77,6 +77,8 @@ unsafe fn init() {
         mm::frame::allocator::init_early_allocator();
     }
 
+    arch::framebuffer::init();
+
     if_tdx_enabled!({
     } else {
         arch::serial::init();
@@ -115,12 +117,14 @@ unsafe fn init() {
 
     smp::init();
 
+    early_println!("test before activate");
+
     // SAFETY: This function is called only once on the BSP.
     unsafe {
         mm::kspace::activate_kernel_page_table();
     }
 
-    arch::framebuffer::init();
+    early_println!("test after activate");
 
     bus::init();
 

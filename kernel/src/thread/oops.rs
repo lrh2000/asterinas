@@ -79,7 +79,7 @@ const MAX_OOPS_COUNT: usize = 10_000;
 
 static OOPS_COUNT: AtomicUsize = AtomicUsize::new(0);
 
-#[ostd::panic_handler]
+/*#[ostd::panic_handler]
 fn panic_handler(info: &core::panic::PanicInfo) -> ! {
     let message = info.message();
 
@@ -127,4 +127,4 @@ fn panic_handler(info: &core::panic::PanicInfo) -> ! {
     }
 
     panic::abort();
-}
+}*/

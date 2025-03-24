@@ -4,6 +4,7 @@
 
 use alloc::{vec, vec::Vec};
 use core::{
+    alloc::Layout,
     fmt::{Arguments, Result, Write},
     ops::IndexMut,
 };
@@ -13,15 +14,17 @@ use spin::Once;
 
 use crate::{
     boot::boot_info,
-    io_mem::IoMem,
-    mm::{CachePolicy, PageFlags, VmIo},
+    mm::{
+        frame::allocator::early_alloc, paddr_to_vaddr, CachePolicy, FallibleVmRead,
+        FallibleVmWrite, PageFlags, VmIo, VmReader, VmWriter,
+    },
     sync::SpinLock,
 };
 
 pub(crate) static WRITER: Once<SpinLock<Writer>> = Once::new();
 
 pub(crate) fn init() {
-    let Some(framebuffer) = boot_info().framebuffer_arg else {
+    let Some(framebuffer) = crate::boot::EARLY_INFO.get().unwrap().framebuffer_arg else {
         return;
     };
 
@@ -33,14 +36,33 @@ pub(crate) fn init() {
     let mut writer = {
         let fb_base = framebuffer.address;
         let fb_len = (framebuffer.width * framebuffer.height * framebuffer.bpp).div_ceil(8);
-        let io_mem = unsafe {
-            IoMem::new(
-                fb_base..fb_base + fb_len,
-                PageFlags::RW,
-                CachePolicy::Writeback,
+
+        let map_base = crate::mm::kspace::LINEAR_MAPPING_BASE_VADDR + 0x40_0000_0000;
+
+        crate::mm::page_table::boot_pt::with_borrow(|pt| {
+            for offset in (0..fb_len).step_by(4096) {
+                unsafe {
+                    pt.map_base_page(
+                        map_base + offset,
+                        (fb_base + offset) / 4096,
+                        crate::mm::PageProperty::new(
+                            crate::mm::PageFlags::RW,
+                            crate::mm::CachePolicy::Writeback,
+                        ),
+                    );
+                }
+            }
+        })
+        .unwrap();
+
+        let io_mem = IoMem(map_base as *mut u8, fb_len);
+        let buffer = unsafe {
+            core::slice::from_raw_parts_mut(
+                paddr_to_vaddr(early_alloc(Layout::from_size_align(fb_len, 4096).unwrap()).unwrap())
+                    as *mut u8,
+                fb_len,
             )
         };
-        let buffer: Vec<u8> = vec![0; fb_len];
         Writer {
             io_mem,
             x_pos: 0,
@@ -48,12 +70,39 @@ pub(crate) fn init() {
             bytes_per_pixel: (framebuffer.bpp / 8),
             width: framebuffer.width,
             height: framebuffer.height,
-            buffer: buffer.leak(),
+            buffer,
         }
     };
 
     writer.clear();
+    writer.write_str("HELLO!!!!").unwrap();
+
     WRITER.call_once(|| SpinLock::new(writer));
+}
+
+struct IoMem(*mut u8, usize);
+
+unsafe impl Send for IoMem {}
+unsafe impl Sync for IoMem {}
+
+impl VmIo for IoMem {
+    fn read(&self, offset: usize, writer: &mut crate::mm::VmWriter) -> crate::Result<()> {
+        unsafe {
+            VmReader::from_kernel_space(self.0, self.1)
+                .skip(offset)
+                .read_fallible(writer)
+        };
+        Ok(())
+    }
+
+    fn write(&self, offset: usize, reader: &mut VmReader) -> crate::Result<()> {
+        unsafe {
+            VmWriter::from_kernel_space(self.0, self.1)
+                .skip(offset)
+                .write_fallible(reader)
+        };
+        Ok(())
+    }
 }
 
 pub(crate) struct Writer {

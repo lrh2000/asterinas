@@ -13,9 +13,9 @@ pub static IFACES: Once<Vec<Arc<Iface>>> = Once::new();
 
 pub fn init() {
     IFACES.call_once(|| {
-        let iface_virtio = new_virtio();
+        // let iface_virtio = new_virtio();
         let iface_loopback = new_loopback();
-        vec![iface_virtio, iface_loopback]
+        vec![/*iface_virtio,*/ iface_loopback]
     });
 
     for (name, _) in aster_network::all_devices() {

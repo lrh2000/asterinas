@@ -56,6 +56,10 @@ pub fn boot_all_aps() {
     };
     log::info!("Found {} processors.", num_cpus);
 
+    if num_cpus <= 1 {
+        return;
+    }
+
     // We currently assumes that bootstrap processor (BSP) have always the
     // processor ID 0. And the processor ID starts from 0 to `num_cpus - 1`.
 
