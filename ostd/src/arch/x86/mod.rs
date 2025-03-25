@@ -99,13 +99,13 @@ pub(crate) unsafe fn late_init_on_bsp() {
 
     crate::boot::smp::boot_all_aps();
 
-    if_tdx_enabled!({
+    /*if_tdx_enabled!({
     } else {
         match iommu::init() {
             Ok(_) => {}
             Err(err) => warn!("IOMMU initialization error:{:?}", err),
         }
-    });
+    });*/
 
     // Some driver like serial may use PIC
     kernel::pic::init();
