@@ -148,7 +148,11 @@ impl<P: NonNullPtr + Send> RcuInner<P> {
         let old_raw_ptr = self.ptr.swap(new_ptr, AcqRel);
 
         if let Some(p) = NonNull::new(old_raw_ptr) {
-            // SAFETY: It was previously returned by `into_raw`.
+            // SAFETY:
+            // 1. The pointer was previously returned by `into_raw`.
+            // 2. The pointer is removed from the RCU slot so that no one will
+            //    use it after the end of the current grace period. The removal
+            //    is done atomically, so it will only be dropped once.
             unsafe { delay_drop::<P>(p) };
         }
     }
@@ -232,7 +236,11 @@ impl<P: NonNullPtr + Send> RcuReadGuardInner<'_, P> {
         }
 
         if let Some(p) = NonNull::new(self.obj_ptr) {
-            // SAFETY: It was previously returned by `into_raw`.
+            // SAFETY:
+            // 1. The pointer was previously returned by `into_raw`.
+            // 2. The pointer is removed from the RCU slot so that no one will
+            //    use it after the end of the current grace period. The removal
+            //    is done atomically, so it will only be dropped once.
             unsafe { delay_drop::<P>(p) };
         }
 
@@ -396,8 +404,8 @@ impl<P: NonNullPtr + Send> RcuOptionReadGuard<'_, P> {
 
 /// # Safety
 ///
-/// The pointer must be previously returned by `into_raw` and the pointer
-/// must be only be dropped once.
+/// The pointer must be previously returned by `into_raw`, will not be used
+/// after the end of the current grace period, and will only be dropped once.
 unsafe fn delay_drop<P: NonNullPtr + Send>(pointer: NonNull<<P as NonNullPtr>::Target>) {
     struct ForceSend<P: NonNullPtr + Send>(NonNull<<P as NonNullPtr>::Target>);
     // SAFETY: Sending a raw pointer to another task is safe as long as
