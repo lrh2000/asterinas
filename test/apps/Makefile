@@ -40,6 +40,7 @@ TEST_APPS := \
 	sched \
 	shm \
 	signal_c \
+	snake \
 	vsock \
 
 # The C head and source files of all the apps, excluding the downloaded mongoose files
