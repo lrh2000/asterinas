@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: MPL-2.0
 
 use alloc::{sync::Arc, vec::Vec};
+use core::ops::Deref;
 
 use aster_console::{AnyConsoleDevice, ConsoleCallback};
+use aster_keyboard::InputKey;
 use ostd::{
+    mm::VmReader,
     sync::{LocalIrqDisabled, SpinLock},
     Error, Result,
 };
@@ -16,9 +19,9 @@ use crate::{
 };
 
 /// A text console rendered onto the framebuffer.
-#[derive(Debug)]
 pub struct FramebufferConsole {
     inner: SpinLock<(ConsoleState, EscapeFsm), LocalIrqDisabled>,
+    callbacks: SpinLock<Vec<&'static ConsoleCallback>, LocalIrqDisabled>,
 }
 
 pub const CONSOLE_NAME: &str = "Framebuffer-Console";
@@ -32,6 +35,7 @@ pub(crate) fn init() {
     };
 
     FRAMEBUFFER_CONSOLE.call_once(|| Arc::new(FramebufferConsole::new(fb.clone())));
+    aster_keyboard::register_callback(&handle_keyboard_input);
 }
 
 impl AnyConsoleDevice for FramebufferConsole {
@@ -54,8 +58,8 @@ impl AnyConsoleDevice for FramebufferConsole {
         }
     }
 
-    fn register_callback(&self, _: &'static ConsoleCallback) {
-        // Unsupported, do nothing.
+    fn register_callback(&self, callback: &'static ConsoleCallback) {
+        self.callbacks.lock().push(callback);
     }
 }
 
@@ -76,12 +80,19 @@ impl FramebufferConsole {
 
         Self {
             inner: SpinLock::new((state, esc_fsm)),
+            callbacks: SpinLock::new(Vec::new()),
         }
     }
 
     /// Sets the font for the framebuffer console.
     pub fn set_font(&self, font: BitmapFont) -> Result<()> {
         self.inner.lock().0.set_font(font)
+    }
+}
+
+impl core::fmt::Debug for FramebufferConsole {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("FramebufferConsole").finish()
     }
 }
 
@@ -224,5 +235,21 @@ impl EscapeOp for ConsoleState {
 
     fn set_bg_color(&mut self, val: Pixel) {
         self.bg_color = val;
+    }
+}
+
+fn handle_keyboard_input(key: InputKey) {
+    if key == InputKey::Nul {
+        return;
+    }
+
+    let Some(console) = FRAMEBUFFER_CONSOLE.get() else {
+        return;
+    };
+
+    let buffer = key.deref();
+    for callback in console.callbacks.lock().iter() {
+        let reader = VmReader::from(buffer);
+        callback(reader);
     }
 }
