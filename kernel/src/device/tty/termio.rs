@@ -326,3 +326,32 @@ pub(super) struct CWinSize {
     ws_xpixel: u16,
     ws_ypixel: u16,
 }
+
+/// A font operation; `console_font_op` in Linux.
+///
+/// Reference: <https://elixir.bootlin.com/linux/v6.0.9/source/include/uapi/linux/kd.h#L157>.
+#[derive(Debug, Clone, Copy, Default, Pod)]
+#[repr(C)]
+pub(super) struct CFontOp {
+    pub(super) op: u32,
+    pub(super) flags: u32,
+    pub(super) width: u32,
+    pub(super) height: u32,
+    pub(super) charcount: u32,
+    pub(super) data: usize,
+}
+
+impl CFontOp {
+    // https://elixir.bootlin.com/linux/v6.15/source/include/uapi/linux/kd.h#L177
+    pub(super) const OP_SET: u32 = 0;
+    pub(super) const OP_SET_DEFAULT: u32 = 2;
+    pub(super) const OP_SET_TALL: u32 = 4;
+
+    // https://elixir.bootlin.com/linux/v6.15/source/drivers/tty/vt/vt.c#L4711
+    pub(super) const MAX_WIDTH: u32 = 64;
+    pub(super) const MAX_HEIGHT: u32 = 128;
+    pub(super) const MAX_CHARCOUNT: u32 = 512;
+
+    // https://elixir.bootlin.com/linux/v6.15/source/drivers/tty/vt/vt.c#L4721
+    pub(super) const NONTALL_VPITCH: u32 = 32;
+}

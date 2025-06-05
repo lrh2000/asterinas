@@ -3,7 +3,6 @@
 use alloc::{sync::Arc, vec::Vec};
 
 use aster_console::{AnyConsoleDevice, ConsoleCallback};
-use font8x8::UnicodeFonts;
 use ostd::{
     sync::{LocalIrqDisabled, SpinLock},
     Error, Result,
@@ -12,14 +11,9 @@ use spin::Once;
 
 use crate::{
     ansi_escape::{EscapeFsm, EscapeOp},
+    font::BitmapFont,
     FrameBuffer, Pixel, FRAMEBUFFER,
 };
-
-/// The font width in pixels when using `font8x8`.
-const FONT_WIDTH: usize = 8;
-
-/// The font height in pixels when using `font8x8`.
-const FONT_HEIGHT: usize = 8;
 
 /// A text console rendered onto the framebuffer.
 #[derive(Debug)]
@@ -56,8 +50,7 @@ impl AnyConsoleDevice for FramebufferConsole {
                 continue;
             }
 
-            let c = char::from_u32(*byte as u32).unwrap();
-            state.send_char(c);
+            state.send_char(*byte);
         }
     }
 
@@ -74,6 +67,7 @@ impl FramebufferConsole {
             y_pos: 0,
             fg_color: Pixel::WHITE,
             bg_color: Pixel::BLACK,
+            font: BitmapFont::new_basic8x8(),
             bytes: alloc::vec![0u8; framebuffer.size()],
             backend: framebuffer,
         };
@@ -84,6 +78,11 @@ impl FramebufferConsole {
             inner: SpinLock::new((state, esc_fsm)),
         }
     }
+
+    /// Sets the font for the framebuffer console.
+    pub fn set_font(&self, font: BitmapFont) -> Result<()> {
+        self.inner.lock().0.set_font(font)
+    }
 }
 
 #[derive(Debug)]
@@ -92,82 +91,123 @@ pub(super) struct ConsoleState {
     y_pos: usize,
     fg_color: Pixel,
     bg_color: Pixel,
+    font: BitmapFont,
     bytes: Vec<u8>,
     backend: Arc<FrameBuffer>,
 }
 
 impl ConsoleState {
+    /// Sends a single character to be drawn on the framebuffer.
+    pub(self) fn send_char(&mut self, ch: u8) {
+        if ch == b'\n' {
+            self.newline();
+            return;
+        } else if ch == b'\r' {
+            self.carriage_return();
+            return;
+        } else if ch == b'\x08' {
+            self.backspace();
+            return;
+        }
+
+        if self.x_pos > self.backend.width() - self.font.width() {
+            self.newline();
+        }
+
+        self.draw_char(ch);
+
+        self.x_pos += self.font.width();
+    }
+
+    fn newline(&mut self) {
+        self.y_pos += self.font.height();
+        self.x_pos = 0;
+
+        if self.y_pos > self.backend.height() - self.font.height() {
+            self.shift_lines_up();
+        }
+    }
+
+    fn shift_lines_up(&mut self) {
+        let offset = self.backend.calc_offset(0, self.font.height()).as_usize();
+        self.bytes.copy_within(offset.., 0);
+        self.bytes[self.backend.size() - offset..].fill(0);
+
+        self.backend.write_bytes_at(0, &self.bytes).unwrap();
+
+        self.y_pos -= self.font.height();
+    }
+
     fn carriage_return(&mut self) {
         self.x_pos = 0;
     }
 
-    fn newline(&mut self) {
-        if self.y_pos >= self.backend.height() - FONT_HEIGHT {
-            self.shift_lines_up();
+    fn backspace(&mut self) {
+        if self.x_pos >= self.font.width() {
+            self.x_pos -= self.font.height();
         }
-        self.y_pos += FONT_HEIGHT;
-        self.x_pos = 0;
+        // TODO: What should we do if we're at the beginning of the line?
     }
 
-    fn shift_lines_up(&mut self) {
-        let offset = self.backend.calc_offset(0, FONT_HEIGHT).as_usize();
-        self.bytes.copy_within(offset.., 0);
-        self.bytes[self.backend.size() - offset..].fill(0);
-        self.backend.write_bytes_at(0, &self.bytes).unwrap();
-        self.y_pos -= FONT_HEIGHT;
-    }
-
-    /// Sends a single character to be drawn on the framebuffer.
-    ///
-    /// # Panics
-    ///
-    /// This method will panic if the character is not one of
-    /// the Basic Latin characters (`U+0000` - `U+007F`).
-    pub(self) fn send_char(&mut self, c: char) {
-        if c == '\n' {
-            self.newline();
+    fn draw_char(&mut self, ch: u8) {
+        let Some(font_ch) = self.font.char(ch) else {
             return;
-        } else if c == '\r' {
-            self.carriage_return();
-            return;
-        }
+        };
 
-        if self.x_pos + FONT_WIDTH > self.backend.width() {
-            self.newline();
-        }
-
-        let rendered = font8x8::BASIC_FONTS
-            .get(c)
-            .expect("character not found in basic font");
         let fg_pixel = self.backend.render_pixel(self.fg_color);
         let bg_pixel = self.backend.render_pixel(self.bg_color);
+
+        let pixel_size = fg_pixel.nbytes();
+
         let mut offset = self.backend.calc_offset(self.x_pos, self.y_pos);
-        for byte in rendered.iter() {
-            for bit in 0..8 {
-                let on = *byte & (1 << bit) != 0;
-                let pixel = if on { fg_pixel } else { bg_pixel };
 
-                // Cache the rendered pixel
-                self.bytes[offset.as_usize()..offset.as_usize() + pixel.nbytes()]
-                    .copy_from_slice(pixel.as_slice());
-                // Write the pixel to the framebuffer
-                self.backend.write_pixel_at(offset, pixel).unwrap();
+        for row in font_ch.rows() {
+            let off_st = offset.as_usize();
+            let off_ed = off_st + pixel_size * self.font.width();
+            let render_buf = &mut self.bytes[off_st..off_ed];
 
-                offset.x_add(1);
+            // Write pixels to the console buffer.
+            let chunks = render_buf.chunks_exact_mut(pixel_size);
+            for (chunk, is_fg) in chunks.zip(row.bits()) {
+                let pixel = if is_fg { fg_pixel } else { bg_pixel };
+                chunk.copy_from_slice(pixel.as_slice());
             }
-            offset.x_add(-(FONT_WIDTH as isize));
+
+            // Write pixels to the framebuffer.
+            self.backend.write_bytes_at(off_st, render_buf).unwrap();
+
             offset.y_add(1);
         }
-        self.x_pos += FONT_WIDTH;
+    }
+
+    /// Sets the font for the framebuffer console.
+    pub(self) fn set_font(&mut self, font: BitmapFont) -> Result<()> {
+        if font.width() > self.backend.width() {
+            return Err(Error::InvalidArgs);
+        }
+        if font.height() > self.backend.height() / 2 {
+            return Err(Error::InvalidArgs);
+        }
+
+        self.font = font;
+
+        if self.y_pos > self.backend.height() - self.font.height() {
+            self.shift_lines_up();
+        }
+
+        Ok(())
     }
 }
 
 impl EscapeOp for ConsoleState {
     fn set_cursor(&mut self, x: usize, y: usize) -> Result<()> {
-        let x_pos = x.checked_mul(FONT_WIDTH).ok_or(Error::InvalidArgs)?;
-        let y_pos = y.checked_mul(FONT_HEIGHT).ok_or(Error::InvalidArgs)?;
+        let x_pos = x.checked_mul(self.font.width()).ok_or(Error::InvalidArgs)?;
+        let y_pos = y
+            .checked_mul(self.font.height())
+            .ok_or(Error::InvalidArgs)?;
 
-        if x_pos > self.backend.width() - FONT_WIDTH || y_pos > self.backend.height() - FONT_HEIGHT
+        if x_pos > self.backend.width() - self.font.width()
+            || y_pos > self.backend.height() - self.font.height()
         {
             return Err(Error::InvalidArgs);
         }
