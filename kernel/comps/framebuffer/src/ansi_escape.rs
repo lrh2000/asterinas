@@ -199,7 +199,10 @@ impl EscapeFsm {
         match byte {
             // CUP - Cursor Position
             b'H' if num_params == 2 => {
-                let _ = op.set_cursor(self.params[0] as usize, self.params[1] as usize);
+                let _ = op.set_cursor(
+                    self.params[1].saturating_sub(1) as usize,
+                    self.params[0].saturating_sub(1) as usize,
+                );
             }
 
             // SGR - Select Graphic Rendition
