@@ -219,6 +219,12 @@ impl EscapeFsm {
     fn handle_srg<T: EscapeOp>(&self, num_params: usize, op: &mut T) {
         for param in &self.params[..num_params] {
             match param {
+                // Reset text attributes
+                0 => {
+                    op.set_fg_color(Pixel::WHITE);
+                    op.set_bg_color(Pixel::BLACK);
+                }
+
                 // Set foreground and background colors.
                 // Reference: <https://en.wikipedia.org/wiki/ANSI_escape_code#3-bit_and_4-bit>
                 30..37 => op.set_fg_color(COLORS[*param as usize - 30]),
