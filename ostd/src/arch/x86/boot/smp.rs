@@ -52,6 +52,8 @@ use crate::{
 ///
 /// This function needs to be called after the OS initializes the ACPI table.
 pub(crate) fn count_processors() -> Option<u32> {
+    return Some(1);
+
     let acpi_tables = get_acpi_tables()?;
     let madt_table = acpi_tables.find_table::<acpi::madt::Madt>().ok()?;
 
