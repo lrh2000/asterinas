@@ -4,7 +4,7 @@ use alloc::vec::Vec;
 
 use crate::{boot::memory_region::MemoryRegionType, io::IoMemAllocatorBuilder};
 
-/// Initializes the allocatable MMIO area based on the RISC-V memory
+/// Initializes the allocatable MMIO area based on the ARM memory
 /// distribution map.
 ///
 /// Here we consider all the holes (filtering usable RAM) in the physical

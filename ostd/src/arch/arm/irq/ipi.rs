@@ -9,9 +9,9 @@ use crate::cpu::PinCurrentCpu;
 pub(crate) struct HwCpuId(u32);
 
 impl HwCpuId {
-    #[expect(unused_variables)]
-    pub(crate) fn read_current(guard: &dyn PinCurrentCpu) -> Self {
-        Self(crate::arch::boot::smp::get_current_hart_id())
+    pub(crate) fn read_current(_guard: &dyn PinCurrentCpu) -> Self {
+        // TODO: Support SMP in ARM.
+        Self(0)
     }
 }
 

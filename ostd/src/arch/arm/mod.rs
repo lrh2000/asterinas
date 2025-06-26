@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
-//! Platform-specific code for the RISC-V platform.
+//! Platform-specific code for the ARM platform.
 
 #![expect(dead_code)]
 
@@ -40,22 +40,12 @@ pub(crate) unsafe fn late_init_on_bsp() {
     // after the kernel page table is activated.
     let io_mem_builder = unsafe { io::construct_io_mem_allocator_builder() };
 
-    // SAFETY: This function is called once and at most once at a proper timing
-    // in the boot context of the BSP, with no external interrupt-related
-    // operations having been performed.
-    unsafe { irq::chip::init(&io_mem_builder) };
-
     // SAFETY: We're on the BSP and we're ready to boot all APs.
     unsafe { crate::boot::smp::boot_all_aps() };
 
-    // SAFETY: This function is called once and at most once at a proper timing
-    // in the boot context of the BSP, with no timer-related operations having
-    // been performed.
-    unsafe { timer::init() };
-
     // SAFETY:
     // 1. All the system device memory have been removed from the builder.
-    // 2. RISC-V platforms do not have port I/O.
+    // 2. ARM platforms do not have port I/O.
     unsafe { crate::io::init(io_mem_builder) };
 }
 
@@ -65,22 +55,20 @@ pub(crate) unsafe fn init_on_ap() {
 
 /// Returns the frequency of TSC. The unit is Hz.
 pub fn tsc_freq() -> u64 {
-    timer::get_timebase_freq()
+    unimplemented!()
 }
 
 /// Reads the current value of the processor's time-stamp counter (TSC).
 pub fn read_tsc() -> u64 {
-    riscv::register::time::read64()
+    unimplemented!()
 }
 
 /// Reads a hardware generated 64-bit random value.
 ///
 /// Returns `None` if no random value was generated.
 pub fn read_random() -> Option<u64> {
-    // FIXME: Implement a hardware random number generator on RISC-V platforms.
+    // FIXME: Implement a hardware random number generator on ARM platforms.
     None
 }
 
-pub(crate) fn enable_cpu_features() {
-    cpu::extension::init();
-}
+pub(crate) fn enable_cpu_features() {}

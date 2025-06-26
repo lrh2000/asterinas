@@ -2,9 +2,7 @@
 
 #![expect(unused_variables)]
 
-#[cfg(target_arch = "x86_64")]
-use ostd::arch::cpu::context::CpuException;
-#[cfg(target_arch = "riscv64")]
+#[cfg(not(target_arch = "loongarch64"))]
 use ostd::arch::cpu::context::CpuException;
 #[cfg(target_arch = "loongarch64")]
 use ostd::arch::cpu::context::CpuExceptionInfo as CpuException;
