@@ -18,32 +18,35 @@
 
 use core::arch::{asm, global_asm};
 
-use crate::{
-    arch::cpu::{
-        context::GeneralRegs,
-        extension::{IsaExtensions, has_extensions},
-    },
-    mm::fault::TrapFrameApi,
-};
+use crate::{arch::cpu::context::GeneralRegs, mm::fault::TrapFrameApi};
 
-/// FPU status bits.
-/// Reference: <https://riscv.github.io/riscv-isa-manual/snapshot/privileged/#sstatus>.
-pub(in crate::arch) const SSTATUS_FS_MASK: usize = 0b11 << 13;
-/// Supervisor User Memory access bit.
-/// Reference: <https://riscv.github.io/riscv-isa-manual/snapshot/privileged/#sstatus>.
-pub(in crate::arch) const SSTATUS_SUM: usize = 0b1 << 18;
+/// Saved registers on a trap.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(C)]
+pub struct RawUserContext {
+    /// Trap num: Source and Kind
+    pub trap_num: usize,
+    /// Reserved for internal use
+    pub __reserved: usize,
+    /// Exception Link Register, elr_el1
+    pub elr: usize,
+    /// Saved Process Status Register, spsr_el1
+    pub spsr: usize,
+    /// Stack Pointer, sp_el0
+    pub sp: usize,
+    /// Software Thread ID Register, tpidr_el0
+    pub tpidr: usize,
+    /// General registers
+    /// Must be last in this struct
+    pub general: GeneralRegs,
+}
 
-global_asm!(
-    include_str!("trap.S"),
-    SSTATUS_FS_MASK = const SSTATUS_FS_MASK,
-    SSTATUS_SUM = const SSTATUS_SUM
-);
+global_asm!(include_str!("trap.S"));
 
-/// Initialize interrupt handling for the current HART.
+/// Initializes interrupt handling on ARM.
 ///
 /// This function will:
-/// - Set `sscratch` to 0.
-/// - Set `stvec` to internal exception vector.
+/// - Set `vbar_el1` to internal exception vector.
 ///
 /// # Safety
 ///
@@ -54,11 +57,8 @@ pub(super) unsafe fn init_on_cpu() {
     // SAFETY: We believe that these assembly instructions correctly set up
     // the trap handling for the current CPU without side effects.
     unsafe {
-        // Set sscratch register to 0, indicating to exception vector that we
-        // are presently executing in the kernel.
-        asm!("csrw sscratch, zero");
-        // Set the exception vector address.
-        asm!("csrw stvec, {}", in(reg) trap_entry as *const () as usize);
+        // Set the exception vector address
+        asm!("msr vbar_el1, {}", in(reg) __vectors as *const () as usize);
     }
 }
 
@@ -78,53 +78,30 @@ pub(super) unsafe fn init_on_cpu() {
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct TrapFrame {
+    /// Trap num: Source and Kind
+    pub trap_num: usize,
+    /// Reserved for internal use
+    pub __reserved: usize,
+    /// Exception Link Register, elr_el1
+    pub elr: usize,
+    /// Saved Process Status Register, spsr_el1
+    pub spsr: usize,
+    /// Stack Pointer, sp_el1
+    pub sp: usize,
+    /// Software Thread ID Register, tpidr_el1
+    pub tpidr: usize,
     /// General registers
+    /// Must be last in this struct
     pub general: GeneralRegs,
-    /// Supervisor Status
-    pub sstatus: usize,
-    /// Supervisor Exception Program Counter
-    pub sepc: usize,
 }
 
 impl TrapFrameApi for TrapFrame {
     fn set_instruction_pointer(&mut self, ip: usize) {
-        self.sepc = ip;
+        self.elr = ip;
     }
 
     fn instruction_pointer(&self) -> usize {
-        self.sepc
-    }
-}
-
-/// Saved registers on a trap.
-#[repr(C)]
-#[derive(Clone, Copy, Debug)]
-pub(in crate::arch) struct RawUserContext {
-    /// General registers
-    pub(in crate::arch) general: GeneralRegs,
-    /// Supervisor Status
-    pub(in crate::arch) sstatus: usize,
-    /// Supervisor Exception Program Counter
-    pub(in crate::arch) sepc: usize,
-}
-
-impl Default for RawUserContext {
-    fn default() -> Self {
-        let sstatus = if has_extensions(IsaExtensions::F)
-            || has_extensions(IsaExtensions::D)
-            || has_extensions(IsaExtensions::Q)
-        {
-            const SSTATUS_FS_INITIAL: usize = 0b01 << 13;
-            SSTATUS_FS_INITIAL
-        } else {
-            0
-        };
-
-        Self {
-            general: GeneralRegs::default(),
-            sstatus,
-            sepc: 0,
-        }
+        self.elr
     }
 }
 
@@ -132,7 +109,7 @@ impl RawUserContext {
     /// Goes to user space with the context, and comes back when a trap occurs.
     ///
     /// On return, the context will be reset to the status before the trap.
-    /// Trap reason and error code will be placed at `scause` and `stval`.
+    /// Trap reason and error code will be placed at `trap_num`.
     pub(in crate::arch) fn run(&mut self) {
         let guard = crate::irq::disable_local();
 
@@ -147,6 +124,6 @@ impl RawUserContext {
 }
 
 unsafe extern "C" {
-    unsafe fn trap_entry();
+    unsafe fn __vectors();
     unsafe fn run_user(regs: &mut RawUserContext);
 }

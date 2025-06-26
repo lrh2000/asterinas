@@ -28,10 +28,7 @@ impl SbiSerial {
 
 impl fmt::Write for SbiSerial {
     fn write_str(&mut self, s: &str) -> fmt::Result {
-        for c in s.as_bytes() {
-            sbi_rt::console_write_byte(*c);
-        }
-        Ok(())
+        unimplemented!()
     }
 }
 

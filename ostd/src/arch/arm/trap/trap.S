@@ -9,177 +9,167 @@
  *
  * We make the following new changes:
  * * Adjust some symbol names.
- * * Disable FPU and U-mode memory access on traps.
+ * * Revise some comments.
  *
  * These changes are released under the following license:
  *
  * SPDX-License-Identifier: MPL-2.0
  */
 
-# Constant and Macros for riscv64:
-.equ XLENB, 8
-.macro LOAD_SP a1, a2
-    ld \a1, \a2*XLENB(sp)
-.endm
-.macro STORE_SP a1, a2
-    sd \a1, \a2*XLENB(sp)
-.endm
-
 .text
 
-.balign 4
-.global trap_entry
-trap_entry:
-    # If coming from userspace, preserve the user stack pointer and load
-    # the kernel stack pointer. If we came from the kernel, sscratch
-    # will contain 0, and we should continue on the current stack.
-    csrrw sp, sscratch, sp
-    bnez sp, _trap_from_user
+trap_common:
+    # x30 and x0 are saved in __vectors
+    # x0 is trap num now
+    # skip __reversed
+    str     x29, [sp, #-16]!
+    stp     x27, x28, [sp, #-16]!
+    stp     x25, x26, [sp, #-16]!
+    stp     x23, x24, [sp, #-16]!
+    stp     x21, x22, [sp, #-16]!
+    stp     x19, x20, [sp, #-16]!
+    stp     x17, x18, [sp, #-16]!
+    stp     x15, x16, [sp, #-16]!
+    stp     x13, x14, [sp, #-16]!
+    stp     x11, x12, [sp, #-16]!
+    stp     x9, x10, [sp, #-16]!
+    stp     x7, x8, [sp, #-16]!
+    stp     x5, x6, [sp, #-16]!
+    stp     x3, x4, [sp, #-16]!
+    stp     x1, x2, [sp, #-16]!
+
+    # skip tpidr and sp
+    add     sp, sp, #-16
+
+    # read spsr and elr
+    mrs     x2, spsr_el1
+    mrs     x1, elr_el1
+    stp     x1, x2, [sp, #-16]!
+
+    # save trap num
+    str     x0, [sp, #-16]!
+
+    # check source is 2
+    mov     x1, #0x3
+    and     x1, x1, x0
+    cmp     x1, #2
+    beq     _trap_from_user
 
 _trap_from_kernel:
-    csrr sp, sscratch
-    addi sp, sp, -34 * XLENB
-    # sscratch = previous-sp, sp = kernel-sp
-    # fallthrough
+    # read tpidr and sp
+    mrs     x2, tpidr_el1
+    add     x1, sp, #38*8
+    stp     x1, x2, [sp, #32]
+
+    # go to rust
+    mov     x0, sp
+    bl      trap_handler
+
+    # load tpidr
+    ldr     x1, [sp, #40]
+    msr     tpidr_el1, x1
+
+    b       _trap_return
 
 _trap_from_user:
-    # save general registers except sp(x2)
-    STORE_SP x1, 1
-    STORE_SP x3, 3
-    STORE_SP x4, 4
-    STORE_SP x5, 5
-    STORE_SP x6, 6
-    STORE_SP x7, 7
-    STORE_SP x8, 8
-    STORE_SP x9, 9
-    STORE_SP x10, 10
-    STORE_SP x11, 11
-    STORE_SP x12, 12
-    STORE_SP x13, 13
-    STORE_SP x14, 14
-    STORE_SP x15, 15
-    STORE_SP x16, 16
-    STORE_SP x17, 17
-    STORE_SP x18, 18
-    STORE_SP x19, 19
-    STORE_SP x20, 20
-    STORE_SP x21, 21
-    STORE_SP x22, 22
-    STORE_SP x23, 23
-    STORE_SP x24, 24
-    STORE_SP x25, 25
-    STORE_SP x26, 26
-    STORE_SP x27, 27
-    STORE_SP x28, 28
-    STORE_SP x29, 29
-    STORE_SP x30, 30
-    STORE_SP x31, 31
+    # read tpidr and sp
+    mrs     x2, tpidr_el0
+    mrs     x1, sp_el0
+    stp     x1, x2, [sp, #32]
 
-    # save sp, sstatus, sepc
-    csrrw t0, sscratch, x0                   # sscratch = 0 (kernel)
-    li t3, {SSTATUS_FS_MASK} | {SSTATUS_SUM} # disable FPU to prevent unexpected usage of floating point in kernel space
-                                             # disable U-mode memory access as it should be set on demand
-    csrrc t1, sstatus, t3
-    csrr t2, sepc
-    STORE_SP t0, 2                           # save sp
-    STORE_SP t1, 32                          # save sstatus
-    STORE_SP t2, 33                          # save sepc
+    # read sp
+    ldr     x2, [sp, #8]
+    mov     sp, x2
 
-    andi t1, t1, 1 << 8                      # sstatus.SPP == 1
-    beqz t1, _end_trap_from_user
-
-_end_trap_from_kernel:
-    mv a0, sp                                # first arg is TrapFrame
-    lla ra, _trap_return                     # set return address
-.extern trap_handler
-    j trap_handler
-
-_end_trap_from_user:
     # load callee-saved registers
-    LOAD_SP sp, 0
-    LOAD_SP s0, 0
-    LOAD_SP s1, 1
-    LOAD_SP s2, 2
-    LOAD_SP s3, 3
-    LOAD_SP s4, 4
-    LOAD_SP s5, 5
-    LOAD_SP s6, 6
-    LOAD_SP s7, 7
-    LOAD_SP s8, 8
-    LOAD_SP s9, 9
-    LOAD_SP s10, 10
-    LOAD_SP s11, 11
-    LOAD_SP ra, 12
-    # not callee-saved, but is used to store the CPU-local storage's base address
-    LOAD_SP gp, 13
-    addi sp, sp, 14 * XLENB
+    ldp     x19, x20, [sp], #16
+    ldp     x21, x22, [sp], #16
+    ldp     x23, x24, [sp], #16
+    ldp     x25, x26, [sp], #16
+    ldp     x27, x28, [sp], #16
+    ldp     x29, x30, [sp], #16
 
     ret
 
+.macro HANDLER source kind
+    .align 7
+    # sp is set to sp_el1 upon trap
+    stp     lr, x0, [sp, #-16]!
+    mov     x0, #\source
+    movk    x0, #\kind, lsl #16
+    b       trap_common
+.endm
+
+.align 11
+.global __vectors
+__vectors:
+    HANDLER 0 0
+    HANDLER 0 1
+    HANDLER 0 2
+    HANDLER 0 3
+    HANDLER 1 0
+    HANDLER 1 1
+    HANDLER 1 2
+    HANDLER 1 3
+    HANDLER 2 0
+    HANDLER 2 1
+    HANDLER 2 2
+    HANDLER 2 3
+    HANDLER 3 0
+    HANDLER 3 1
+    HANDLER 3 2
+    HANDLER 3 3
+
 .global run_user
 run_user: # (regs: &mut RawUserContext)
-    # save callee-saved registers
-    addi sp, sp, -14 * XLENB
-    STORE_SP s0, 0
-    STORE_SP s1, 1
-    STORE_SP s2, 2
-    STORE_SP s3, 3
-    STORE_SP s4, 4
-    STORE_SP s5, 5
-    STORE_SP s6, 6
-    STORE_SP s7, 7
-    STORE_SP s8, 8
-    STORE_SP s9, 9
-    STORE_SP s10, 10
-    STORE_SP s11, 11
-    STORE_SP ra, 12
-    # not callee-saved, but is used to store the CPU-local storage's base address
-    STORE_SP gp, 13
+    # x0 points to TrapFrame
+    # save callee-saved registers x19-x29
+    stp     x29, x30, [sp, #-16]!
+    stp     x27, x28, [sp, #-16]!
+    stp     x25, x26, [sp, #-16]!
+    stp     x23, x24, [sp, #-16]!
+    stp     x21, x22, [sp, #-16]!
+    stp     x19, x20, [sp, #-16]!
 
-    mv t0, sp
-    mv sp, a0
-    STORE_SP t0, 0          # save kernel-sp
-    csrw sscratch, sp       # sscratch = bottom of trap frame
+    # save kernel sp to TrapFrame
+    mov     x1, sp
+    mov     sp, x0
+    str     x1, [sp, #8]
+
+    # load sp and tpidr
+    ldp     x1, x2, [sp, #32]
+    msr     sp_el0, x1
+    msr     tpidr_el0, x2
 
 _trap_return:
-    LOAD_SP t0, 32          # t0 = sstatus
-    LOAD_SP t1, 33          # t1 = sepc
-    csrw sstatus, t0        # load sstatus
-    csrw sepc, t1           # load sepc
+    # sp points to TrapFrame
+    # skip trap num, don't restore
+    add     sp, sp, #16
 
-    # restore general registers except sp(x2)
-    LOAD_SP x1, 1
-    LOAD_SP x3, 3
-    LOAD_SP x4, 4
-    LOAD_SP x5, 5
-    LOAD_SP x6, 6
-    LOAD_SP x7, 7
-    LOAD_SP x8, 8
-    LOAD_SP x9, 9
-    LOAD_SP x10, 10
-    LOAD_SP x11, 11
-    LOAD_SP x12, 12
-    LOAD_SP x13, 13
-    LOAD_SP x14, 14
-    LOAD_SP x15, 15
-    LOAD_SP x16, 16
-    LOAD_SP x17, 17
-    LOAD_SP x18, 18
-    LOAD_SP x19, 19
-    LOAD_SP x20, 20
-    LOAD_SP x21, 21
-    LOAD_SP x22, 22
-    LOAD_SP x23, 23
-    LOAD_SP x24, 24
-    LOAD_SP x25, 25
-    LOAD_SP x26, 26
-    LOAD_SP x27, 27
-    LOAD_SP x28, 28
-    LOAD_SP x29, 29
-    LOAD_SP x30, 30
-    LOAD_SP x31, 31
-    # restore sp last
-    LOAD_SP x2, 2
+    # elr and spsr
+    ldp     x1, x2, [sp], #16
+    msr     elr_el1, x1
+    msr     spsr_el1, x2
 
-    # return from supervisor call
-    sret
+    # skip sp and tpidr
+    add     sp, sp, #16
+
+    # general purpose registers
+    ldp     x1, x2, [sp], #16
+    ldp     x3, x4, [sp], #16
+    ldp     x5, x6, [sp], #16
+    ldp     x7, x8, [sp], #16
+    ldp     x9, x10, [sp], #16
+    ldp     x11, x12, [sp], #16
+    ldp     x13, x14, [sp], #16
+    ldp     x15, x16, [sp], #16
+    ldp     x17, x18, [sp], #16
+    ldp     x19, x20, [sp], #16
+    ldp     x21, x22, [sp], #16
+    ldp     x23, x24, [sp], #16
+    ldp     x25, x26, [sp], #16
+    ldp     x27, x28, [sp], #16
+    ldr     x29, [sp], #16
+    ldp     lr, x0, [sp], #16
+
+    eret

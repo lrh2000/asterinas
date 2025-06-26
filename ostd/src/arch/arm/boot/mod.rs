@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
-//! The RISC-V boot module defines the entrypoints of Asterinas.
+//! The ARM boot module defines the entrypoints of Asterinas.
 
 pub(crate) mod smp;
 
@@ -40,7 +40,7 @@ fn parse_initramfs() -> Option<&'static [u8]> {
 }
 
 fn parse_acpi_arg() -> BootloaderAcpiArg {
-    // TDDO: Add ACPI support for RISC-V, maybe.
+    // TDDO: Add ACPI support for ARM, maybe.
     BootloaderAcpiArg::NotProvided
 }
 
@@ -104,11 +104,7 @@ fn parse_initramfs_range() -> Option<(usize, usize)> {
     Some((initrd_start, initrd_end))
 }
 
-static mut BOOTSTRAP_HART_ID: u32 = u32::MAX;
-
 /// The entry point of the Rust code portion of Asterinas.
-///
-/// `BOOTSTRAP_HART_ID` is initialized to be `hart_id` and accessible after calling this.
 ///
 /// # Safety
 ///
@@ -116,13 +112,8 @@ static mut BOOTSTRAP_HART_ID: u32 = u32::MAX;
 /// - The caller must follow C calling conventions and put the right arguments in registers.
 // SAFETY: The name does not collide with other symbols.
 #[unsafe(no_mangle)]
-unsafe extern "C" fn riscv_boot(hart_id: usize, device_tree_paddr: usize) -> ! {
+unsafe extern "C" fn riscv_boot(_hart_id: usize, device_tree_paddr: usize) -> ! {
     early_println!("Enter riscv_boot");
-
-    // We will only write it once. Other processors will only read it.
-    // SAFETY: We don't create Rust references, so there are no aliasing problems. Other processors
-    // have not been booted yet, so there are no data races.
-    unsafe { BOOTSTRAP_HART_ID = hart_id as u32 };
 
     let device_tree_ptr = paddr_to_vaddr(device_tree_paddr) as *const u8;
     let fdt = unsafe { Fdt::from_ptr(device_tree_ptr).unwrap() };

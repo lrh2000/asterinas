@@ -16,62 +16,62 @@ use crate::{
 
 impl LinuxAbi for UserContext {
     fn syscall_num(&self) -> usize {
-        self.a7()
+        self.x8()
     }
 
     fn syscall_ret(&self) -> usize {
-        self.a0()
+        self.x0()
     }
 
     fn set_syscall_ret(&mut self, ret: usize) {
-        self.set_a0(ret)
+        self.set_x0(ret)
     }
 
     fn syscall_args(&self) -> [usize; 6] {
         [
-            self.a0(),
-            self.a1(),
-            self.a2(),
-            self.a3(),
-            self.a4(),
-            self.a5(),
+            self.x0(),
+            self.x1(),
+            self.x2(),
+            self.x3(),
+            self.x4(),
+            self.x5(),
         ]
     }
 }
 
 macro_rules! copy_gp_regs {
-    ($src: ident, $dst: ident) => {
-        $dst.ra = $src.ra;
-        $dst.sp = $src.sp;
-        $dst.gp = $src.gp;
-        $dst.tp = $src.tp;
-        $dst.t0 = $src.t0;
-        $dst.t1 = $src.t1;
-        $dst.t2 = $src.t2;
-        $dst.s0 = $src.s0;
-        $dst.s1 = $src.s1;
-        $dst.a0 = $src.a0;
-        $dst.a1 = $src.a1;
-        $dst.a2 = $src.a2;
-        $dst.a3 = $src.a3;
-        $dst.a4 = $src.a4;
-        $dst.a5 = $src.a5;
-        $dst.a6 = $src.a6;
-        $dst.a7 = $src.a7;
-        $dst.s2 = $src.s2;
-        $dst.s3 = $src.s3;
-        $dst.s4 = $src.s4;
-        $dst.s5 = $src.s5;
-        $dst.s6 = $src.s6;
-        $dst.s7 = $src.s7;
-        $dst.s8 = $src.s8;
-        $dst.s9 = $src.s9;
-        $dst.s10 = $src.s10;
-        $dst.s11 = $src.s11;
-        $dst.t3 = $src.t3;
-        $dst.t4 = $src.t4;
-        $dst.t5 = $src.t5;
-        $dst.t6 = $src.t6;
+    ($regs: ident) => {
+        copy_reg!(0, x0, $regs);
+        copy_reg!(1, x1, $regs);
+        copy_reg!(2, x2, $regs);
+        copy_reg!(3, x3, $regs);
+        copy_reg!(4, x4, $regs);
+        copy_reg!(5, x5, $regs);
+        copy_reg!(6, x6, $regs);
+        copy_reg!(7, x7, $regs);
+        copy_reg!(8, x8, $regs);
+        copy_reg!(9, x9, $regs);
+        copy_reg!(10, x10, $regs);
+        copy_reg!(11, x11, $regs);
+        copy_reg!(12, x12, $regs);
+        copy_reg!(13, x13, $regs);
+        copy_reg!(14, x14, $regs);
+        copy_reg!(15, x15, $regs);
+        copy_reg!(16, x16, $regs);
+        copy_reg!(17, x17, $regs);
+        copy_reg!(18, x18, $regs);
+        copy_reg!(19, x19, $regs);
+        copy_reg!(20, x20, $regs);
+        copy_reg!(21, x21, $regs);
+        copy_reg!(22, x22, $regs);
+        copy_reg!(23, x23, $regs);
+        copy_reg!(24, x24, $regs);
+        copy_reg!(25, x25, $regs);
+        copy_reg!(26, x26, $regs);
+        copy_reg!(27, x27, $regs);
+        copy_reg!(28, x28, $regs);
+        copy_reg!(29, x29, $regs);
+        copy_reg!(30, x30, $regs);
     };
 }
 
@@ -80,58 +80,46 @@ macro_rules! copy_gp_regs {
 /// This contains the context saved before a signal handler is invoked; it will be restored by
 /// `sys_rt_sigreturn`.
 ///
-/// Reference: <https://elixir.bootlin.com/linux/v6.15.7/source/arch/riscv/include/uapi/asm/sigcontext.h#L30>
+/// Reference: <https://elixir.bootlin.com/linux/v6.15.7/source/arch/arm64/include/uapi/asm/sigcontext.h#L28>
 #[repr(C)]
 #[repr(align(16))]
 #[derive(Clone, Copy, Debug, Default, Pod)]
 pub struct SigContext {
-    pc: usize,
-    ra: usize,
-    sp: usize,
-    gp: usize,
-    tp: usize,
-    t0: usize,
-    t1: usize,
-    t2: usize,
-    s0: usize,
-    s1: usize,
-    a0: usize,
-    a1: usize,
-    a2: usize,
-    a3: usize,
-    a4: usize,
-    a5: usize,
-    a6: usize,
-    a7: usize,
-    s2: usize,
-    s3: usize,
-    s4: usize,
-    s5: usize,
-    s6: usize,
-    s7: usize,
-    s8: usize,
-    s9: usize,
-    s10: usize,
-    s11: usize,
-    t3: usize,
-    t4: usize,
-    t5: usize,
-    t6: usize,
-    // In RISC-V, the signal stack layout places the FPU context directly
+    fault_address: u64,
+    regs: [u64; 31],
+    sp: u64,
+    pc: u64,
+    pstate: u64,
+    _pad: u64,
+    // In ARM, the signal stack layout places the FPU context directly
     // after the general-purpose registers.
 }
 
 impl SigContext {
     pub fn copy_user_regs_to(&self, dst: &mut UserContext) {
+        macro_rules! copy_reg {
+            ($idx: literal, $name: ident, $regs: ident) => {
+                $regs.$name = self.regs[$idx] as usize;
+            };
+        }
+
         let gp_regs = dst.general_regs_mut();
-        copy_gp_regs!(self, gp_regs);
-        dst.set_instruction_pointer(self.pc);
+        copy_gp_regs!(gp_regs);
+        dst.set_stack_pointer(self.sp as usize);
+        dst.set_instruction_pointer(self.pc as usize);
     }
 
     pub fn copy_user_regs_from(&mut self, src: &UserContext) {
+        macro_rules! copy_reg {
+            ($idx:literal, $name:ident, $regs: ident) => {
+                self.regs[$idx] = $regs.$name as u64;
+            };
+        }
+
         let gp_regs = src.general_regs();
-        copy_gp_regs!(gp_regs, self);
-        self.pc = src.instruction_pointer();
+        copy_gp_regs!(gp_regs);
+        self.sp = src.stack_pointer() as u64;
+        self.pc = src.instruction_pointer() as u64;
     }
 }
 
@@ -141,18 +129,7 @@ impl TryFrom<&CpuException> for PageFaultInfo {
     type Error = ();
 
     fn try_from(value: &CpuException) -> Result<Self, ()> {
-        use CpuException::*;
-
-        let (fault_addr, required_perms) = match value {
-            InstructionPageFault(addr) => (addr, VmPerms::EXEC),
-            LoadPageFault(addr) => (addr, VmPerms::READ),
-            // On riscv64, writable pages must also be readable.
-            // Reference: <https://riscv.github.io/riscv-isa-manual/snapshot/privileged/#translation>.
-            StorePageFault(addr) => (addr, VmPerms::READ | VmPerms::WRITE),
-            _ => return Err(()),
-        };
-
-        Ok(PageFaultInfo::new(*fault_addr, required_perms))
+        unimplemented!()
     }
 }
 

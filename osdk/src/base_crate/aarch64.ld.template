@@ -1,5 +1,5 @@
 ENTRY(_start)
-OUTPUT_ARCH(riscv)
+OUTPUT_ARCH(aarch64)
 
 KERNEL_LMA = 0x80200000;
 KERNEL_VMA = 0xffffffff80200000;

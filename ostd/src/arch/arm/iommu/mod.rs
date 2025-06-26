@@ -24,7 +24,7 @@ pub(crate) fn unmap(_daddr: Daddr) -> Result<(), IommuError> {
 }
 
 pub(crate) fn init() -> Result<(), IommuError> {
-    // TODO: We will support IOMMU on RISC-V
+    // TODO: We will support IOMMU on ARM
     Err(IommuError::NoIommu)
 }
 

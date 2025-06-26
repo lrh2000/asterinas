@@ -1,49 +1,25 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use core::ops::Range;
+use core::{intrinsics::AtomicOrdering::Relaxed, ops::Range};
 
-use spin::Once;
-pub(crate) use util::{
-    __atomic_cmpxchg_fallible, __atomic_load_fallible, __memcpy_fallible, __memset_fallible,
-};
-
-use crate::{
-    arch::{
-        boot::DEVICE_TREE,
-        cpu::extension::{IsaExtensions, has_extensions},
+use crate::mm::{
+    PAGE_SIZE, Paddr, PagingConstsTrait, PagingLevel, PodOnce, Vaddr,
+    dma::DmaDirection,
+    page_prop::{
+        CachePolicy, PageFlags, PageProperty, PageTableFlags, PrivilegedPageFlags as PrivFlags,
     },
-    mm::{
-        PAGE_SIZE, Paddr, PagingConstsTrait, PagingLevel, PodOnce, Vaddr,
-        dma::DmaDirection,
-        page_prop::{
-            CachePolicy, PageFlags, PageProperty, PageTableFlags, PrivilegedPageFlags as PrivFlags,
-        },
-        page_table::{PteScalar, PteTrait},
-    },
+    page_table::{PteScalar, PteTrait},
 };
-
-mod util;
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct PagingConsts {}
 
-#[cfg(not(feature = "riscv_sv39_mode"))]
 impl PagingConstsTrait for PagingConsts {
     const BASE_PAGE_SIZE: usize = 4096;
     const NR_LEVELS: PagingLevel = 4;
     const ADDRESS_WIDTH: usize = 48;
     const VA_SIGN_EXT: bool = true;
     const HIGHEST_TRANSLATION_LEVEL: PagingLevel = 4;
-    const PTE_SIZE: usize = size_of::<PageTableEntry>();
-}
-
-#[cfg(feature = "riscv_sv39_mode")]
-impl PagingConstsTrait for PagingConsts {
-    const BASE_PAGE_SIZE: usize = 4096;
-    const NR_LEVELS: PagingLevel = 3;
-    const ADDRESS_WIDTH: usize = 39;
-    const VA_SIGN_EXT: bool = true;
-    const HIGHEST_TRANSLATION_LEVEL: PagingLevel = 2;
     const PTE_SIZE: usize = size_of::<PageTableEntry>();
 }
 
@@ -85,7 +61,7 @@ bitflags::bitflags! {
 }
 
 pub(crate) fn tlb_flush_addr(vaddr: Vaddr) {
-    riscv::asm::sfence_vma(0, vaddr);
+    unimplemented!()
 }
 
 pub(crate) fn tlb_flush_addr_range(range: &Range<Vaddr>) {
@@ -95,17 +71,15 @@ pub(crate) fn tlb_flush_addr_range(range: &Range<Vaddr>) {
 }
 
 pub(crate) fn tlb_flush_all_excluding_global() {
-    // RISC-V does not provide a way to exclude global pages and flush all
-    // other TLB entries. Therefore, we flush all, including global pages.
-    riscv::asm::sfence_vma_all()
+    unimplemented!()
 }
 
 pub(crate) fn tlb_flush_all_including_global() {
-    riscv::asm::sfence_vma_all()
+    unimplemented!()
 }
 
 pub(crate) fn can_sync_dma() -> bool {
-    has_extensions(IsaExtensions::ZICBOM)
+    false
 }
 
 /// # Safety
@@ -114,42 +88,9 @@ pub(crate) fn can_sync_dma() -> bool {
 ///  - the virtual address range and DMA direction correspond correctly to a
 ///    DMA region;
 ///  - `can_sync_dma()` is `true`.
+#[expect(clippy::extra_unused_type_parameters)]
 pub(crate) unsafe fn sync_dma_range<D: DmaDirection>(range: Range<Vaddr>) {
-    debug_assert!(can_sync_dma());
-
-    static CMO_MANAGEMENT_BLOCK_SIZE: Once<usize> = Once::new();
-    let cmo_management_block_size = *CMO_MANAGEMENT_BLOCK_SIZE.call_once(|| {
-        DEVICE_TREE
-            .get()
-            .unwrap()
-            .cpus()
-            .find(|cpu| cpu.property("mmu-type").is_some())
-            .expect("Failed to find an application CPU node in device tree")
-            .property("riscv,cbom-block-size")
-            .expect("Failed to find `riscv,cbom-block-size` property of the CPU node")
-            .as_usize()
-            .expect("Failed to parse `riscv,cbom-block-size` property of the CPU node")
-    });
-
-    for addr in range.step_by(cmo_management_block_size) {
-        // Performing cache maintenance operations is required for correctness
-        // on systems with non-coherent DMA.
-        // SAFETY: The caller ensures that the virtual address range corresponds
-        // to a DMA region. So the underlying memory is untyped and the operations
-        // are safe to perform.
-        unsafe {
-            match (D::CAN_READ_FROM_DEVICE, D::CAN_WRITE_TO_DEVICE) {
-                (false, true) => core::arch::asm!("cbo.clean ({})", in(reg) addr, options(nostack)),
-                (true, false) => core::arch::asm!("cbo.inval ({})", in(reg) addr, options(nostack)),
-                (true, true) => core::arch::asm!("cbo.flush ({})", in(reg) addr, options(nostack)),
-                _ => unreachable!(),
-            }
-        }
-    }
-
-    // Ensure that all cache operations have completed before proceeding.
-    // SAFETY: Performing a memory fence is always safe.
-    unsafe { core::arch::asm!("fence rw, rw", options(nostack)) };
+    unreachable!("`can_sync_dma()` never returns `true`");
 }
 
 /// Activates the given root-level page table.
@@ -159,20 +100,11 @@ pub(crate) unsafe fn sync_dma_range<D: DmaDirection>(range: Range<Vaddr>) {
 /// Changing the root-level page table is unsafe, because it's possible to violate memory safety by
 /// changing the page mapping.
 pub(crate) unsafe fn activate_page_table(root_paddr: Paddr) {
-    assert!(root_paddr.is_multiple_of(PagingConsts::BASE_PAGE_SIZE));
-    let ppn = root_paddr >> 12;
-
-    #[cfg(not(feature = "riscv_sv39_mode"))]
-    let mode = riscv::register::satp::Mode::Sv48;
-    #[cfg(feature = "riscv_sv39_mode")]
-    let mode = riscv::register::satp::Mode::Sv39;
-
-    // SAFETY: The safety is upheld by the caller.
-    unsafe { riscv::register::satp::set(mode, 0, ppn) };
+    unimplemented!()
 }
 
 pub(crate) fn current_page_table_paddr() -> Paddr {
-    riscv::register::satp::read().ppn() << 12
+    unimplemented!()
 }
 
 #[repr(C)]
@@ -249,14 +181,7 @@ impl PageTableEntry {
 
         match prop.cache {
             CachePolicy::Writeback => (),
-            CachePolicy::Uncacheable => {
-                // TODO: Currently Asterinas uses `Uncacheable` only for I/O
-                // memory. Normal memory can also be `Noncacheable`, where the
-                // PBMT should be set to `PBMT_NC`.
-                if has_extensions(IsaExtensions::SVPBMT) {
-                    flags |= PteFlags::PBMT_IO.bits()
-                }
-            }
+            CachePolicy::Uncacheable => flags |= PteFlags::PBMT_IO.bits(),
             _ => panic!("unsupported cache policy"),
         }
 
@@ -301,5 +226,30 @@ unsafe impl PteTrait for PageTableEntry {
         } else {
             PteScalar::PageTable(self.paddr(), self.pt_flags())
         }
+    }
+}
+
+pub(crate) unsafe fn __memcpy_fallible(dst: *mut u8, src: *const u8, size: usize) -> usize {
+    // TODO: Implement this fallible operation.
+    unsafe { core::ptr::copy(src, dst, size) };
+    0
+}
+
+pub(crate) unsafe fn __memset_fallible(dst: *mut u8, value: u8, size: usize) -> usize {
+    // TODO: Implement this fallible operation.
+    unsafe { core::ptr::write_bytes(dst, value, size) };
+    0
+}
+
+pub(crate) unsafe fn __atomic_load_fallible(ptr: *const u32) -> u64 {
+    // TODO: Implement this fallible operation.
+    unsafe { core::intrinsics::atomic_load::<_, { Relaxed }>(ptr) as u64 }
+}
+
+pub(crate) unsafe fn __atomic_cmpxchg_fallible(ptr: *mut u32, old_val: u32, new_val: u32) -> u64 {
+    // TODO: Implement this fallible operation.
+    unsafe {
+        core::intrinsics::atomic_cxchg::<_, { Relaxed }, { Relaxed }>(ptr, old_val, new_val).0
+            as u64
     }
 }
