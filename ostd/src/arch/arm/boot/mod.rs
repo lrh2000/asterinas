@@ -112,11 +112,13 @@ fn parse_initramfs_range() -> Option<(usize, usize)> {
 /// - The caller must follow C calling conventions and put the right arguments in registers.
 // SAFETY: The name does not collide with other symbols.
 #[unsafe(no_mangle)]
-unsafe extern "C" fn riscv_boot(_hart_id: usize, device_tree_paddr: usize) -> ! {
-    early_println!("Enter riscv_boot");
-
-    let device_tree_ptr = paddr_to_vaddr(device_tree_paddr) as *const u8;
-    let fdt = unsafe { Fdt::from_ptr(device_tree_ptr).unwrap() };
+unsafe extern "C" fn arm_boot() -> ! {
+    // This is the physical address of the device tree, as shown in the QEMU documentations:
+    // <https://qemu-project.gitlab.io/qemu/system/arm/virt.html#hardware-configuration-information-for-bare-metal-programming>.
+    // FIXME: In order to support various other boards, we need more reliable way to obtain the
+    // device tree location.
+    let device_tree_ptr = paddr_to_vaddr(0x4000_0000) as *const u8;
+    let fdt = unsafe { fdt::Fdt::from_ptr(device_tree_ptr).unwrap() };
     DEVICE_TREE.call_once(|| fdt);
 
     use crate::boot::{EARLY_INFO, EarlyBootInfo, start_kernel};
