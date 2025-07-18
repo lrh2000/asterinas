@@ -85,6 +85,7 @@ unsafe fn init() {
     });
     #[cfg(not(target_arch = "x86_64"))]
     arch::serial::init();
+    early_println!("HELLO WORLD FROM ARM!");
 
     logger::init();
 

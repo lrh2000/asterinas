@@ -4,9 +4,7 @@
 
 // FIXME: Mark this as unsafe. See
 // <https://github.com/asterinas/asterinas/issues/1120#issuecomment-2748696592>.
-pub(crate) fn enable_local() {
-    unimplemented!()
-}
+pub(crate) fn enable_local() {}
 
 /// Enables local IRQs and halts the CPU to wait for interrupts.
 ///
@@ -25,5 +23,5 @@ pub(crate) fn disable_local() {
 }
 
 pub(crate) fn is_local_enabled() -> bool {
-    unimplemented!()
+    false
 }
