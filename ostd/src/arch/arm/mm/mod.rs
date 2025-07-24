@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use core::{intrinsics::AtomicOrdering::Relaxed, ops::Range};
+use core::{arch::asm, intrinsics::AtomicOrdering::Relaxed, ops::Range};
 
 use crate::mm::{
     PAGE_SIZE, Paddr, PagingConstsTrait, PagingLevel, PodOnce, Vaddr,
@@ -30,38 +30,49 @@ bitflags::bitflags! {
     pub(crate) struct PteFlags: usize {
         /// Specifies whether the mapped frame or page table is valid.
         const VALID =           1 << 0;
-        /// Controls whether reads to the mapped frames are allowed.
-        const READABLE =        1 << 1;
-        /// Controls whether writes to the mapped frames are allowed.
-        const WRITABLE =        1 << 2;
-        /// Controls whether execution code in the mapped frames are allowed.
-        const EXECUTABLE =      1 << 3;
-        /// Controls whether accesses from userspace (i.e. U-mode) are permitted.
-        const USER =            1 << 4;
-        /// Indicates that the mapping is present in all address spaces, so it isn't flushed from
-        /// the TLB on an address space switch.
-        const GLOBAL =          1 << 5;
+        /// Specifies whether the mapping does not points to a huge frame; this bit must also be
+        /// set for all the valid last-level entries.
+        const NON_HUGE =        1 << 1;
+        /// Controls whether accesses from userspace (i.e. EL0) are permitted.
+        const USER =            1 << 6;
+        /// Controls whether writes to the mapped frames are disallowed.
+        const NO_WRITE =        1 << 7;
         /// Whether the memory area represented by this entry is accessed.
-        const ACCESSED =        1 << 6;
+        const ACCESSED =        1 << 10;
+        /// Indicates that the mapping isn't present in all address spaces, so it is flushed from
+        /// the TLB on an address space switch.
+        const NON_GLOBAL =      1 << 11;
+
         /// Whether the memory area represented by this entry is modified.
-        const DIRTY =           1 << 7;
+        const DIRTY =           1 << 51;
+        /// Forbid execute codes on the page.
+        const NO_EXECUTE =      1 << 54;
 
-        // First bit ignored by MMU.
-        const RSV1 =            1 << 8;
-        // Second bit ignored by MMU.
-        const RSV2 =            1 << 9;
+        /// Ignored by the hardware. Free to use.
+        const HIGH_IGN1 =       1 << 55;
+        /// Ignored by the hardware. Free to use.
+        const HIGH_IGN2 =       1 << 56;
 
-        // PBMT: Non-cacheable, idempotent, weakly-ordered (RVWMO), main memory
-        const PBMT_NC =         1 << 61;
-        // PBMT: Non-cacheable, non-idempotent, strongly-ordered (I/O ordering), I/O
-        const PBMT_IO =         1 << 62;
-        /// Naturally aligned power-of-2
-        const NAPOT =           1 << 63;
+        // Be careful that the following fields contain multiple bits!
+        //
+        /// Bit 2-4: Device memory, nGnRnE.
+        const ATTR_DEVICE =     1 << 2;
+        /// Bit 8-9: Inner shareability (effective only for Normal memory).
+        const SH_INNER =        3 << 8;
     }
 }
 
 pub(crate) fn tlb_flush_addr(vaddr: Vaddr) {
-    unimplemented!()
+    // SAFETY: This invalidates the TLB, which doesn't affect the memory safety.
+    unsafe {
+        asm!(
+            "dsb ishst",
+            "tlbi vaae1, {vpn}",
+            "dsb ish",
+            "isb",
+            vpn = in(reg) vaddr >> 12,
+        );
+    }
 }
 
 pub(crate) fn tlb_flush_addr_range(range: &Range<Vaddr>) {
@@ -71,11 +82,14 @@ pub(crate) fn tlb_flush_addr_range(range: &Range<Vaddr>) {
 }
 
 pub(crate) fn tlb_flush_all_excluding_global() {
-    unimplemented!()
+    // ARM does not provide a way to exclude global pages and flush all
+    // other TLB entries. Therefore, we flush all, including global pages.
+    tlb_flush_all_including_global();
 }
 
 pub(crate) fn tlb_flush_all_including_global() {
-    unimplemented!()
+    // SAFETY: This invalidates the TLB, which doesn't affect the memory safety.
+    unsafe { asm!("dsb ishst", "tlbi vmalle1", "dsb ish", "isb") };
 }
 
 pub(crate) fn can_sync_dma() -> bool {
@@ -100,11 +114,30 @@ pub(crate) unsafe fn sync_dma_range<D: DmaDirection>(range: Range<Vaddr>) {
 /// Changing the root-level page table is unsafe, because it's possible to violate memory safety by
 /// changing the page mapping.
 pub(crate) unsafe fn activate_page_table(root_paddr: Paddr) {
-    unimplemented!()
+    // SAFETY: The safety is upheld by the caller.
+    unsafe {
+        asm!(
+            "msr ttbr0_el1, {root_paddr}",
+            "msr ttbr1_el1, {root_paddr}",
+            "isb",
+            root_paddr = in(reg) root_paddr,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+    tlb_flush_all_excluding_global();
 }
 
 pub(crate) fn current_page_table_paddr() -> Paddr {
-    unimplemented!()
+    let root_paddr;
+    // SAFETY: It is safe to read the root-level page table address.
+    unsafe {
+        asm!(
+            "mrs {root_paddr}, ttbr0_el1",
+            root_paddr = out(reg) root_paddr,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+    root_paddr
 }
 
 #[repr(C)]
@@ -119,35 +152,42 @@ macro_rules! parse_flags {
 }
 
 impl PageTableEntry {
-    const PHYS_ADDR_MASK: usize = 0x003f_ffff_ffff_fc00;
+    const PHYS_ADDR_MASK: usize = 0x0000_FFFF_FFFF_F000;
 
-    fn new_without_flags(paddr: Paddr) -> Self {
-        assert_eq!(paddr & !Self::PHYS_ADDR_MASK, 0);
-        Self(paddr >> 12 << 10)
-    }
-
-    fn paddr(&self) -> Paddr {
-        (self.0 & Self::PHYS_ADDR_MASK) >> 10 << 12
+    fn is_present(&self) -> bool {
+        if self.0 & PteFlags::VALID.bits() != 0 {
+            // Child page tables and readable pages.
+            true
+        } else if self.0 & PteFlags::SH_INNER.bits() != 0 {
+            // Non-readable pages (`new_page()` always sets `SH_INNER`).
+            true
+        } else {
+            // Nothing.
+            false
+        }
     }
 
     fn is_last(&self, level: PagingLevel) -> bool {
-        let rwx = PteFlags::READABLE | PteFlags::WRITABLE | PteFlags::EXECUTABLE;
-        level == 1 || (self.0 & rwx.bits()) != 0
+        level == 1 || self.0 & PteFlags::NON_HUGE.bits() == 0
+    }
+
+    fn paddr(&self) -> Paddr {
+        self.0 & Self::PHYS_ADDR_MASK
     }
 
     fn prop(&self) -> PageProperty {
-        let flags = parse_flags!(self.0, PteFlags::READABLE, PageFlags::R)
-            | parse_flags!(self.0, PteFlags::WRITABLE, PageFlags::W)
-            | parse_flags!(self.0, PteFlags::EXECUTABLE, PageFlags::X)
+        let flags = parse_flags!(self.0, PteFlags::VALID, PageFlags::R)
+            | parse_flags!(!self.0, PteFlags::NO_WRITE, PageFlags::W)
+            | parse_flags!(!self.0, PteFlags::NO_EXECUTE, PageFlags::X)
             | parse_flags!(self.0, PteFlags::ACCESSED, PageFlags::ACCESSED)
             | parse_flags!(self.0, PteFlags::DIRTY, PageFlags::DIRTY)
-            | parse_flags!(self.0, PteFlags::RSV2, PageFlags::AVAIL2);
+            | parse_flags!(self.0, PteFlags::HIGH_IGN2, PageFlags::AVAIL2);
 
         let priv_flags = parse_flags!(self.0, PteFlags::USER, PrivFlags::USER)
-            | parse_flags!(self.0, PteFlags::GLOBAL, PrivFlags::GLOBAL)
-            | parse_flags!(self.0, PteFlags::RSV1, PrivFlags::AVAIL1);
+            | parse_flags!(!self.0, PteFlags::NON_GLOBAL, PrivFlags::GLOBAL)
+            | parse_flags!(self.0, PteFlags::HIGH_IGN1, PrivFlags::AVAIL1);
 
-        let cache = if self.0 & PteFlags::PBMT_IO.bits() != 0 {
+        let cache = if self.0 & PteFlags::ATTR_DEVICE.bits() != 0 {
             CachePolicy::Uncacheable
         } else {
             CachePolicy::Writeback
@@ -162,42 +202,69 @@ impl PageTableEntry {
 
     fn pt_flags(&self) -> PageTableFlags {
         let bits = PageTableFlags::empty().bits() as usize
-            | parse_flags!(self.0, PteFlags::RSV1, PageTableFlags::AVAIL1)
-            | parse_flags!(self.0, PteFlags::RSV2, PageTableFlags::AVAIL2);
+            | parse_flags!(self.0, PteFlags::HIGH_IGN1, PageTableFlags::AVAIL1)
+            | parse_flags!(self.0, PteFlags::HIGH_IGN2, PageTableFlags::AVAIL2);
         PageTableFlags::from_bits(bits as u8).unwrap()
     }
 
-    fn new_page(paddr: Paddr, _level: PagingLevel, prop: PageProperty) -> Self {
-        let mut flags = PteFlags::VALID.bits()
-            | parse_flags!(prop.flags.bits(), PageFlags::R, PteFlags::READABLE)
-            | parse_flags!(prop.flags.bits(), PageFlags::W, PteFlags::WRITABLE)
-            | parse_flags!(prop.flags.bits(), PageFlags::X, PteFlags::EXECUTABLE)
+    fn new_page(paddr: Paddr, level: PagingLevel, prop: PageProperty) -> Self {
+        // FIXME: To avoid the Access Flag Fault,
+        // we set the ACCESSED bit to 1 all the time.
+        let mut flags = PteFlags::ACCESSED.bits();
+        if level == 1 {
+            flags |= PteFlags::NON_HUGE.bits();
+        }
+
+        flags |= parse_flags!(prop.flags.bits(), PageFlags::R, PteFlags::VALID)
+            | parse_flags!(!prop.flags.bits(), PageFlags::W, PteFlags::NO_WRITE)
+            | parse_flags!(!prop.flags.bits(), PageFlags::X, PteFlags::NO_EXECUTE)
             | parse_flags!(prop.flags.bits(), PageFlags::ACCESSED, PteFlags::ACCESSED)
             | parse_flags!(prop.flags.bits(), PageFlags::DIRTY, PteFlags::DIRTY)
             | parse_flags!(prop.priv_flags.bits(), PrivFlags::USER, PteFlags::USER)
-            | parse_flags!(prop.priv_flags.bits(), PrivFlags::GLOBAL, PteFlags::GLOBAL)
-            | parse_flags!(prop.priv_flags.bits(), PrivFlags::AVAIL1, PteFlags::RSV1)
-            | parse_flags!(prop.flags.bits(), PageFlags::AVAIL2, PteFlags::RSV2);
+            | parse_flags!(
+                !prop.priv_flags.bits(),
+                PrivFlags::GLOBAL,
+                PteFlags::NON_GLOBAL
+            )
+            | parse_flags!(
+                prop.priv_flags.bits(),
+                PrivFlags::AVAIL1,
+                PteFlags::HIGH_IGN1
+            )
+            | parse_flags!(prop.flags.bits(), PageFlags::AVAIL2, PteFlags::HIGH_IGN2);
 
+        flags |= PteFlags::SH_INNER.bits();
         match prop.cache {
             CachePolicy::Writeback => (),
-            CachePolicy::Uncacheable => flags |= PteFlags::PBMT_IO.bits(),
+            CachePolicy::Uncacheable => {
+                // TODO: Currently Asterinas uses `Uncacheable` only for I/O
+                // memory. Normal memory can also be `Noncacheable`, where the
+                // attribute should not be set to `ATTR_DEVICE`.
+                flags |= PteFlags::ATTR_DEVICE.bits();
+            }
             _ => panic!("unsupported cache policy"),
         }
 
-        let res = Self::new_without_flags(paddr);
-        Self(res.0 | flags)
+        debug_assert_eq!(
+            paddr & !Self::PHYS_ADDR_MASK,
+            0,
+            "page physical address contains invalid bits"
+        );
+        Self(paddr | flags)
     }
 
     fn new_pt(paddr: Paddr, flags: PageTableFlags) -> Self {
-        // In RISC-V, non-leaf PTE should have RWX = 000,
-        // and D, A, and U are reserved for future standard use.
         let flags = PteFlags::VALID.bits()
-            | parse_flags!(flags.bits(), PageTableFlags::AVAIL1, PteFlags::RSV1)
-            | parse_flags!(flags.bits(), PageTableFlags::AVAIL2, PteFlags::RSV2);
+            | PteFlags::NON_HUGE.bits()
+            | parse_flags!(flags.bits(), PageTableFlags::AVAIL1, PteFlags::HIGH_IGN1)
+            | parse_flags!(flags.bits(), PageTableFlags::AVAIL2, PteFlags::HIGH_IGN2);
 
-        let res = Self::new_without_flags(paddr);
-        Self(res.0 | flags)
+        debug_assert_eq!(
+            paddr & !Self::PHYS_ADDR_MASK,
+            0,
+            "page table physical address contains invalid bits"
+        );
+        Self(paddr | flags)
     }
 }
 
@@ -217,7 +284,7 @@ unsafe impl PteTrait for PageTableEntry {
     }
 
     fn to_repr(&self, level: PagingLevel) -> PteScalar {
-        if self.0 & PteFlags::VALID.bits() == 0 {
+        if !self.is_present() {
             return PteScalar::Absent;
         }
 
