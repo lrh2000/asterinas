@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 use alloc::fmt;
-use core::ops::Range;
+use core::{arch::asm, ops::Range};
 
 use spin::Once;
 
@@ -33,38 +33,46 @@ bitflags::bitflags! {
     pub(crate) struct PageTableFlags: usize {
         /// Specifies whether the mapped frame or page table is valid.
         const VALID =           1 << 0;
-        /// Controls whether reads to the mapped frames are allowed.
-        const READABLE =        1 << 1;
-        /// Controls whether writes to the mapped frames are allowed.
-        const WRITABLE =        1 << 2;
-        /// Controls whether execution code in the mapped frames are allowed.
-        const EXECUTABLE =      1 << 3;
-        /// Controls whether accesses from userspace (i.e. U-mode) are permitted.
-        const USER =            1 << 4;
-        /// Indicates that the mapping is present in all address spaces, so it isn't flushed from
-        /// the TLB on an address space switch.
-        const GLOBAL =          1 << 5;
+        /// Specifies whether the mapping does not points to a huge frame; this bit must also be
+        /// set for all the valid last-level entries.
+        const NON_HUGE =        1 << 1;
+        /// Controls whether accesses from userspace (i.e. EL0) are permitted.
+        const USER =            1 << 6;
+        /// Controls whether writes to the mapped frames are disallowed.
+        const NO_WRITE =        1 << 7;
         /// Whether the memory area represented by this entry is accessed.
-        const ACCESSED =        1 << 6;
+        const ACCESSED =        1 << 10;
+        /// Indicates that the mapping isn't present in all address spaces, so it is flushed from
+        /// the TLB on an address space switch.
+        const NON_GLOBAL =      1 << 11;
+
         /// Whether the memory area represented by this entry is modified.
-        const DIRTY =           1 << 7;
+        const DIRTY =           1 << 51;
+        /// Forbid execute codes on the page.
+        const NO_EXECUTE =      1 << 54;
 
-        // First bit ignored by MMU.
-        const RSV1 =            1 << 8;
-        // Second bit ignored by MMU.
-        const RSV2 =            1 << 9;
+        /// Ignored by the hardware. Free to use.
+        const HIGH_IGN1 =       1 << 55;
+        /// Ignored by the hardware. Free to use.
+        const HIGH_IGN2 =       1 << 56;
 
-        // PBMT: Non-cacheable, idempotent, weakly-ordered (RVWMO), main memory
-        const PBMT_NC =         1 << 61;
-        // PBMT: Non-cacheable, non-idempotent, strongly-ordered (I/O ordering), I/O
-        const PBMT_IO =         1 << 62;
-        /// Naturally aligned power-of-2
-        const NAPOT =           1 << 63;
+        // Be careful that the following fields contain multiple bits!
+        //
+        /// Bit 2-4: Device memory, nGnRnE.
+        const ATTR_DEVICE =     1 << 2;
+        /// Bit 8-9: Inner shareability (effective only for Normal memory).
+        const SH_INNER =        3 << 8;
     }
 }
 
 pub(crate) fn tlb_flush_addr(vaddr: Vaddr) {
-    unimplemented!()
+    unsafe {
+        asm!(
+            "dsb ishst",
+            "tlbi vaae1, {vpn}",
+            vpn = in(reg) vaddr >> 12,
+        );
+    }
 }
 
 pub(crate) fn tlb_flush_addr_range(range: &Range<Vaddr>) {
@@ -74,11 +82,16 @@ pub(crate) fn tlb_flush_addr_range(range: &Range<Vaddr>) {
 }
 
 pub(crate) fn tlb_flush_all_excluding_global() {
-    unimplemented!()
+    unsafe {
+        asm!("tlbi vmalle1", "dsb ish", "isb");
+    }
 }
 
 pub(crate) fn tlb_flush_all_including_global() {
-    unimplemented!()
+    // TODO: including global?
+    unsafe {
+        asm!("tlbi vmalle1", "dsb ish", "isb");
+    }
 }
 
 /// # Safety
@@ -95,28 +108,39 @@ pub(crate) struct PageTableEntry(usize);
 
 /// Activates the given root-level page table.
 ///
-/// "satp" register doesn't have a field that encodes the cache policy,
-/// so `_root_pt_cache` is ignored.
+/// `_root_pt_cache` is ignored because it is currently not supported on ARM platforms.
 ///
 /// # Safety
 ///
 /// Changing the root-level page table is unsafe, because it's possible to violate memory safety by
 /// changing the page mapping.
 pub(crate) unsafe fn activate_page_table(root_paddr: Paddr, _root_pt_cache: CachePolicy) {
-    unimplemented!()
+    unsafe {
+        asm!(
+            "msr ttbr0_el1, {root_paddr}",
+            "msr ttbr1_el1, {root_paddr}",
+            root_paddr = in(reg) root_paddr,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
 }
 
 pub(crate) fn current_page_table_paddr() -> Paddr {
-    unimplemented!()
+    let root_paddr;
+    unsafe {
+        asm!(
+            "mrs {root_paddr}, ttbr0_el1",
+            root_paddr = out(reg) root_paddr,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+    root_paddr
 }
 
 impl PageTableEntry {
-    const PHYS_ADDR_MASK: usize = 0x003F_FFFF_FFFF_FC00;
-
-    fn new_paddr(paddr: Paddr) -> Self {
-        let ppn = paddr >> 12;
-        Self(ppn << 10)
-    }
+    const PHYS_ADDR_MASK: usize = 0x0000_FFFF_FFFF_F000;
+    const PROP_MASK: usize =
+        !Self::PHYS_ADDR_MASK & !PageTableFlags::VALID.union(PageTableFlags::NON_HUGE).bits();
 }
 
 /// Parse a bit-flag bits `val` in the representation of `from` to `to` in bits.
@@ -133,36 +157,38 @@ impl PageTableEntryTrait for PageTableEntry {
         self.0 & PageTableFlags::VALID.bits() != 0
     }
 
-    fn new_page(paddr: Paddr, _level: PagingLevel, prop: PageProperty) -> Self {
-        let mut pte = Self::new_paddr(paddr);
+    fn new_page(paddr: Paddr, level: PagingLevel, prop: PageProperty) -> Self {
+        let flags = if level == 1 {
+            PageTableFlags::VALID.bits() | PageTableFlags::NON_HUGE.bits()
+        } else {
+            PageTableFlags::VALID.bits()
+        };
+        let mut pte = Self(paddr & Self::PHYS_ADDR_MASK | flags);
         pte.set_prop(prop);
         pte
     }
 
     fn new_pt(paddr: Paddr) -> Self {
-        // In RISC-V, non-leaf PTE should have RWX = 000,
-        // and D, A, and U are reserved for future standard use.
-        let pte = Self::new_paddr(paddr);
-        PageTableEntry(pte.0 | PageTableFlags::VALID.bits())
+        let flags = (PageTableFlags::VALID | PageTableFlags::NON_HUGE).bits();
+        Self(paddr & Self::PHYS_ADDR_MASK | flags)
     }
 
     fn paddr(&self) -> Paddr {
-        let ppn = (self.0 & Self::PHYS_ADDR_MASK) >> 10;
-        ppn << 12
+        self.0 & Self::PHYS_ADDR_MASK
     }
 
     fn prop(&self) -> PageProperty {
-        let flags = (parse_flags!(self.0, PageTableFlags::READABLE, PageFlags::R))
-            | (parse_flags!(self.0, PageTableFlags::WRITABLE, PageFlags::W))
-            | (parse_flags!(self.0, PageTableFlags::EXECUTABLE, PageFlags::X))
+        let flags = (parse_flags!(self.0, PageTableFlags::VALID, PageFlags::R))
+            | (parse_flags!(!self.0, PageTableFlags::NO_WRITE, PageFlags::W))
+            | (parse_flags!(!self.0, PageTableFlags::NO_EXECUTE, PageFlags::X))
             | (parse_flags!(self.0, PageTableFlags::ACCESSED, PageFlags::ACCESSED))
             | (parse_flags!(self.0, PageTableFlags::DIRTY, PageFlags::DIRTY))
-            | (parse_flags!(self.0, PageTableFlags::RSV2, PageFlags::AVAIL2));
+            | (parse_flags!(self.0, PageTableFlags::HIGH_IGN2, PageFlags::AVAIL2));
         let priv_flags = (parse_flags!(self.0, PageTableFlags::USER, PrivFlags::USER))
-            | (parse_flags!(self.0, PageTableFlags::GLOBAL, PrivFlags::GLOBAL))
-            | (parse_flags!(self.0, PageTableFlags::RSV1, PrivFlags::AVAIL1));
+            | (parse_flags!(!self.0, PageTableFlags::NON_GLOBAL, PrivFlags::GLOBAL))
+            | (parse_flags!(self.0, PageTableFlags::HIGH_IGN1, PrivFlags::AVAIL1));
 
-        let cache = if self.0 & PageTableFlags::PBMT_IO.bits() != 0 {
+        let cache = if self.0 & PageTableFlags::ATTR_DEVICE.bits() != 0 {
             CachePolicy::Uncacheable
         } else {
             CachePolicy::Writeback
@@ -177,10 +203,14 @@ impl PageTableEntryTrait for PageTableEntry {
 
     #[expect(clippy::precedence)]
     fn set_prop(&mut self, prop: PageProperty) {
-        let mut flags = PageTableFlags::VALID.bits()
-            | parse_flags!(prop.flags.bits(), PageFlags::R, PageTableFlags::READABLE)
-            | parse_flags!(prop.flags.bits(), PageFlags::W, PageTableFlags::WRITABLE)
-            | parse_flags!(prop.flags.bits(), PageFlags::X, PageTableFlags::EXECUTABLE)
+        if !self.is_present() {
+            return;
+        }
+
+        let mut flags = parse_flags!(!prop.flags.bits(), PageFlags::W, PageTableFlags::NO_WRITE)
+            | parse_flags!(!prop.flags.bits(), PageFlags::X, PageTableFlags::NO_EXECUTE)
+            | PageTableFlags::ACCESSED.bits()
+            | parse_flags!(prop.flags.bits(), PageFlags::DIRTY, PageTableFlags::DIRTY)
             | parse_flags!(
                 prop.flags.bits(),
                 PageFlags::ACCESSED,
@@ -193,29 +223,38 @@ impl PageTableEntryTrait for PageTableEntry {
                 PageTableFlags::USER
             )
             | parse_flags!(
-                prop.priv_flags.bits(),
+                !prop.priv_flags.bits(),
                 PrivFlags::GLOBAL,
-                PageTableFlags::GLOBAL
+                PageTableFlags::NON_GLOBAL
             )
             | parse_flags!(
                 prop.priv_flags.bits(),
                 PrivFlags::AVAIL1,
-                PageTableFlags::RSV1
+                PageTableFlags::HIGH_IGN1
             )
-            | parse_flags!(prop.flags.bits(), PageFlags::AVAIL2, PageTableFlags::RSV2);
+            | parse_flags!(
+                prop.flags.bits(),
+                PageFlags::AVAIL2,
+                PageTableFlags::HIGH_IGN2
+            );
 
+        flags |= PageTableFlags::SH_INNER.bits();
         match prop.cache {
             CachePolicy::Writeback => (),
-            CachePolicy::Uncacheable => flags |= PageTableFlags::PBMT_IO.bits(),
+            CachePolicy::Uncacheable => {
+                // TODO: Currently Asterinas uses `Uncacheable` only for I/O
+                // memory. Normal memory can also be `Noncacheable`, where the
+                // attribute should not be set to `ATTR_DEVICE`.
+                flags |= PageTableFlags::ATTR_DEVICE.bits()
+            }
             _ => panic!("unsupported cache policy"),
         }
 
-        self.0 = (self.0 & Self::PHYS_ADDR_MASK) | flags;
+        self.0 = (self.0 & !Self::PROP_MASK) | flags;
     }
 
     fn is_last(&self, level: PagingLevel) -> bool {
-        let rwx = PageTableFlags::READABLE | PageTableFlags::WRITABLE | PageTableFlags::EXECUTABLE;
-        level == 1 || (self.0 & rwx.bits()) != 0
+        level == 1 || self.0 & PageTableFlags::NON_HUGE.bits() == 0
     }
 }
 
