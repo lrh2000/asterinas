@@ -48,7 +48,6 @@ pub use self::{
 pub(crate) use self::{
     kspace::paddr_to_vaddr,
     page_prop::{PageTableFlags, PrivilegedPageFlags},
-    page_table::PageTable,
 };
 use crate::arch::mm::PagingConsts;
 
