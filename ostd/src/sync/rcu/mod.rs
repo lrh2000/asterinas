@@ -17,9 +17,12 @@ use non_null::NonNullPtr;
 use spin::once::Once;
 
 use self::monitor::RcuMonitor;
-use crate::task::{
-    atomic_mode::{AsAtomicModeGuard, InAtomicMode},
-    disable_preempt, DisabledPreemptGuard,
+use crate::{
+    task::{
+        atomic_mode::{AsAtomicModeGuard, InAtomicMode},
+        disable_preempt, DisabledPreemptGuard,
+    },
+    util::local::Local,
 };
 
 mod monitor;
@@ -430,7 +433,7 @@ unsafe fn delay_drop<P: NonNullPtr + Send>(pointer: NonNull<<P as NonNullPtr>::T
     let pointer: ForceSend<P> = ForceSend(pointer);
 
     let rcu_monitor = RCU_MONITOR.get().unwrap();
-    rcu_monitor.after_grace_period(move || {
+    rcu_monitor.after_grace_period(Local::new(move |_| {
         // This is necessary to make the Rust compiler to move the entire
         // `ForceSend` structure into the closure.
         let pointer = pointer;
@@ -441,7 +444,7 @@ unsafe fn delay_drop<P: NonNullPtr + Send>(pointer: NonNull<<P as NonNullPtr>::T
         //    finished and this is the only time the pointer gets dropped.
         let p = unsafe { <P as NonNullPtr>::from_raw(pointer.0) };
         drop(p);
-    });
+    }));
 }
 
 /// A wrapper to delay calling destructor of `T` after the RCU grace period.
@@ -459,6 +462,10 @@ pub struct RcuDrop<T: Send + 'static> {
 
 impl<T: Send + 'static> RcuDrop<T> {
     /// Creates a new [`RcuDrop`] instance that delays the dropping of `value`.
+    ///
+    /// We currently require that both `size_of::<T>()` and `align_of::<T>()` must be smaller than
+    /// 8 bytes. Otherwise, the code may not compile. The requirement comes from the default
+    /// generic parameter in [`Local`].
     pub fn new(value: T) -> Self {
         Self {
             value: ManuallyDrop::new(value),
@@ -479,9 +486,9 @@ impl<T: Send + 'static> Drop for RcuDrop<T> {
         // SAFETY: The `ManuallyDrop` will not be used after this point.
         let taken = unsafe { ManuallyDrop::take(&mut self.value) };
         let rcu_monitor = RCU_MONITOR.get().unwrap();
-        rcu_monitor.after_grace_period(|| {
+        rcu_monitor.after_grace_period(Local::new(move |_| {
             drop(taken);
-        });
+        }));
     }
 }
 

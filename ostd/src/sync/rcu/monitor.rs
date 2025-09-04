@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use alloc::collections::VecDeque;
 use core::sync::atomic::{
     AtomicBool,
     Ordering::{self, Relaxed},
@@ -11,6 +10,7 @@ use crate::{
     prelude::*,
     sync::SpinLock,
     task::atomic_mode::AsAtomicModeGuard,
+    util::local::{FnOnceDyn, Local},
 };
 
 /// A RCU monitor ensures the completion of _grace periods_ by keeping track
@@ -69,17 +69,14 @@ impl RcuMonitor {
 
         // Invoke the callbacks to notify the completion of GP
         for f in callbacks {
-            (f)();
+            f.call_once(());
         }
     }
 
-    pub(super) fn after_grace_period<F>(&self, f: F)
-    where
-        F: FnOnce() + Send + 'static,
-    {
+    pub(super) fn after_grace_period(&self, f: Callback) {
         let mut state = self.state.disable_irq().lock();
 
-        state.next_callbacks.push_back(Box::new(f));
+        state.next_callbacks.push(f);
 
         if !state.current_gp.is_complete() {
             return;
@@ -93,22 +90,22 @@ impl RcuMonitor {
 
 struct State {
     current_gp: GracePeriod,
-    next_callbacks: Callbacks,
+    next_callbacks: Vec<Callback>,
 }
 
 impl State {
     fn new() -> Self {
         Self {
             current_gp: GracePeriod::new(),
-            next_callbacks: VecDeque::new(),
+            next_callbacks: Vec::new(),
         }
     }
 }
 
-type Callbacks = VecDeque<Box<dyn FnOnce() + Send + 'static>>;
+type Callback = Local<dyn FnOnceDyn<(), Output = ()> + Send + 'static>;
 
 struct GracePeriod {
-    callbacks: Callbacks,
+    callbacks: Vec<Callback>,
     cpu_mask: AtomicCpuSet,
     is_complete: bool,
 }
@@ -116,7 +113,7 @@ struct GracePeriod {
 impl GracePeriod {
     fn new() -> Self {
         Self {
-            callbacks: Callbacks::new(),
+            callbacks: Vec::new(),
             cpu_mask: AtomicCpuSet::new(CpuSet::new_empty()),
             is_complete: true,
         }
@@ -134,11 +131,11 @@ impl GracePeriod {
         }
     }
 
-    fn take_callbacks(&mut self) -> Callbacks {
+    fn take_callbacks(&mut self) -> Vec<Callback> {
         core::mem::take(&mut self.callbacks)
     }
 
-    fn restart(&mut self, callbacks: Callbacks) {
+    fn restart(&mut self, callbacks: Vec<Callback>) {
         self.is_complete = false;
         self.cpu_mask.store(&CpuSet::new_empty(), Ordering::Relaxed);
         self.callbacks = callbacks;
