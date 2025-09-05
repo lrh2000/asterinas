@@ -2,11 +2,11 @@
 
 mod fs;
 
-use alloc::sync::Arc;
+use ostd::util::local::Local;
 
 use crate::fs::overlayfs::fs::OverlayFsType;
 
 pub(super) fn init() {
-    let overlay_type = Arc::new(OverlayFsType);
+    let overlay_type = Local::new(OverlayFsType);
     super::registry::register(overlay_type, None).unwrap();
 }

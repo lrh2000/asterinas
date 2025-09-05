@@ -451,6 +451,7 @@ pub struct ExfatMountOptions {
     pub(super) zero_size_dir: bool,
 }
 
+#[derive(Clone)]
 pub(super) struct ExfatType;
 
 impl FsType for ExfatType {

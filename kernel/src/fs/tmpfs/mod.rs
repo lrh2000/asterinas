@@ -2,7 +2,7 @@
 
 //! Temporary file system (tmpfs) based on RamFS.
 
-use alloc::sync::Arc;
+use ostd::util::local::Local;
 
 mod fs;
 
@@ -10,6 +10,6 @@ mod fs;
 const TMPFS_MAGIC: u64 = 0x0102_1994;
 
 pub(super) fn init() {
-    let ramfs_type = Arc::new(fs::TmpFsType);
+    let ramfs_type = Local::new(fs::TmpFsType);
     super::registry::register(ramfs_type, None).unwrap();
 }

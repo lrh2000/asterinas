@@ -1109,6 +1109,7 @@ pub struct OverlayConfig {
 // TODO: Complete the super block struct.
 struct OverlaySB;
 
+#[derive(Clone)]
 pub(super) struct OverlayFsType;
 
 impl FsType for OverlayFsType {

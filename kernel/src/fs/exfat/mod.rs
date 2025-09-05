@@ -10,14 +10,13 @@ mod super_block;
 mod upcase_table;
 mod utils;
 
-use alloc::sync::Arc;
-
 pub use fs::{ExfatFS, ExfatMountOptions};
+use ostd::util::local::Local;
 
 use crate::fs::exfat::fs::ExfatType;
 
 pub(super) fn init() {
-    let exfat_type = Arc::new(ExfatType);
+    let exfat_type = Local::new(ExfatType);
     super::registry::register(exfat_type, None).unwrap();
 }
 

@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use alloc::sync::Arc;
-
 use aster_systree::singleton as systree_singleton;
 use spin::Once;
 
@@ -70,6 +68,7 @@ impl FileSystem for SysFs {
     }
 }
 
+#[derive(Clone)]
 pub(super) struct SysFsType;
 
 impl FsType for SysFsType {

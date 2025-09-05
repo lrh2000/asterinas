@@ -37,6 +37,7 @@ impl FileSystem for TmpFs {
     }
 }
 
+#[derive(Clone)]
 pub(super) struct TmpFsType;
 
 impl FsType for TmpFsType {

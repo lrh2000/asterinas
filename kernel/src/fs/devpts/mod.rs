@@ -6,6 +6,7 @@ use core::time::Duration;
 
 use aster_util::slot_vec::SlotVec;
 use id_alloc::IdAlloc;
+use ostd::util::local::Local;
 
 use self::{ptmx::Ptmx, slave::PtySlaveInode};
 use super::utils::MknodType;
@@ -105,6 +106,7 @@ impl FileSystem for DevPts {
     }
 }
 
+#[derive(Clone)]
 struct DevPtsType;
 
 impl FsType for DevPtsType {
@@ -126,7 +128,7 @@ impl FsType for DevPtsType {
 }
 
 pub(super) fn init() {
-    let devpts_type = Arc::new(DevPtsType);
+    let devpts_type = Local::new(DevPtsType);
     super::registry::register(devpts_type, None).unwrap();
 }
 

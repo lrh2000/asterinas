@@ -65,6 +65,7 @@ impl FileSystem for CgroupFs {
     }
 }
 
+#[derive(Clone)]
 pub(super) struct CgroupFsType;
 
 impl FsType for CgroupFsType {

@@ -2,6 +2,8 @@
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
+use ostd::util::local::Local;
+
 use self::{
     cpuinfo::CpuInfoFileOps,
     loadavg::LoadAvgFileOps,
@@ -37,7 +39,7 @@ mod template;
 mod thread_self;
 
 pub(super) fn init() {
-    let procfs_type = Arc::new(ProcFsType);
+    let procfs_type = Local::new(ProcFsType);
     super::registry::register(procfs_type, None).unwrap();
 }
 
@@ -86,6 +88,7 @@ impl FileSystem for ProcFS {
     }
 }
 
+#[derive(Clone)]
 struct ProcFsType;
 
 impl FsType for ProcFsType {

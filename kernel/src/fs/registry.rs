@@ -1,17 +1,24 @@
 // SPDX-License-Identifier: MPL-2.0
 
 use alloc::borrow::ToOwned;
+use core::clone::CloneToUninit;
 
 use aster_block::BlockDevice;
 use aster_systree::{
     inherit_sys_branch_node, AttrLessBranchNodeFields, SysBranchNode, SysObj, SysPerms, SysStr,
 };
+use ostd::util::local::Local;
 use spin::Once;
 
 use crate::{fs::utils::FileSystem, prelude::*};
 
 /// A type of file system.
-pub trait FsType: Send + Sync + 'static {
+///
+/// Note that this must be a zero-sized unit type.
+//
+// It currently requires `Clone` (via `CloneToUninit`) because `look_up` returns a copy. This
+// behavior may need furthur investigation when adding support of unregistering a FS type.
+pub trait FsType: Send + Sync + CloneToUninit + 'static {
     /// Gets the name of this FS type such as `"ext4"` or `"sysfs"`.
     fn name(&self) -> &'static str;
 
@@ -47,12 +54,15 @@ bitflags! {
 /// should also be provided. Otherwise, the node can be `None`.
 //
 // TODO: Figure out what should happen when unregistering the FS type.
-pub fn register(new_type: Arc<dyn FsType>, sysnode: Option<Arc<dyn SysBranchNode>>) -> Result<()> {
+pub fn register(
+    new_type: Local<dyn FsType, 0>,
+    sysnode: Option<Arc<dyn SysBranchNode>>,
+) -> Result<()> {
     FS_REGISTRY.get().unwrap().register(new_type, sysnode)
 }
 
 /// Looks up a FS type.
-pub fn look_up(name: &str) -> Option<Arc<dyn FsType>> {
+pub fn look_up(name: &str) -> Option<Local<dyn FsType, 0>> {
     FS_REGISTRY
         .get()
         .unwrap()
@@ -66,11 +76,11 @@ pub fn look_up(name: &str) -> Option<Arc<dyn FsType>> {
 /// and every FS type.
 pub fn with_iter<F, R>(f: F) -> R
 where
-    F: FnOnce(&mut dyn Iterator<Item = (&String, &Arc<dyn FsType>)>) -> R,
+    F: FnOnce(&mut dyn Iterator<Item = (&String, &dyn FsType)>) -> R,
 {
     let guard = FS_REGISTRY.get().unwrap().fs_table.lock();
-    let mut iter = guard.iter();
 
+    let mut iter = guard.iter().map(|(name, fs_type)| (name, &**fs_type));
     f(&mut iter)
 }
 
@@ -90,7 +100,7 @@ pub fn init() {
 static FS_REGISTRY: Once<Arc<FsRegistry>> = Once::new();
 
 struct FsRegistry {
-    fs_table: Mutex<BTreeMap<String, Arc<dyn FsType>>>,
+    fs_table: Mutex<BTreeMap<String, Local<dyn FsType, 0>>>,
     systree_fields: AttrLessBranchNodeFields<dyn SysObj, Self>,
 }
 
@@ -118,7 +128,7 @@ impl FsRegistry {
     /// Registers a file system control interface.
     fn register(
         &self,
-        new_type: Arc<dyn FsType>,
+        new_type: Local<dyn FsType, 0>,
         sysnode: Option<Arc<dyn SysBranchNode>>,
     ) -> crate::Result<()> {
         let mut fs_table = self.fs_table.lock();

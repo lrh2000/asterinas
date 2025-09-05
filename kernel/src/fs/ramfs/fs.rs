@@ -1272,6 +1272,7 @@ fn now() -> Duration {
     RealTimeCoarseClock::get().read_time()
 }
 
+#[derive(Clone)]
 pub(super) struct RamFsType;
 
 impl FsType for RamFsType {

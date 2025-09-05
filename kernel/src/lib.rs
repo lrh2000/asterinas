@@ -8,6 +8,7 @@
 #![deny(unsafe_code)]
 #![feature(btree_cursors)]
 #![feature(btree_extract_if)]
+#![feature(clone_to_uninit)]
 #![feature(debug_closure_helpers)]
 #![feature(extend_one)]
 #![feature(extract_if)]

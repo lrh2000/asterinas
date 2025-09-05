@@ -439,6 +439,7 @@ impl Ext2 {
     }
 }
 
+#[derive(Clone)]
 pub(super) struct Ext2Type;
 
 impl FsType for Ext2Type {

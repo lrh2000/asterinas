@@ -2,9 +2,8 @@
 
 //! Ramfs based on PageCache
 
-use alloc::sync::Arc;
-
 pub use fs::{new_detached_inode, RamFS};
+use ostd::util::local::Local;
 
 use crate::fs::ramfs::fs::RamFsType;
 
@@ -17,6 +16,6 @@ const ROOT_INO: u64 = 1;
 const NAME_MAX: usize = 255;
 
 pub(super) fn init() {
-    let ramfs_type = Arc::new(RamFsType);
+    let ramfs_type = Local::new(RamFsType);
     super::registry::register(ramfs_type, None).unwrap();
 }
