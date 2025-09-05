@@ -116,7 +116,6 @@ impl FsType for DevPtsType {
         &self,
         _args: Option<CString>,
         _disk: Option<Arc<dyn aster_block::BlockDevice>>,
-        _ctx: &Context,
     ) -> Result<Arc<dyn FileSystem>> {
         Ok(DevPts::new())
     }
@@ -124,15 +123,11 @@ impl FsType for DevPtsType {
     fn properties(&self) -> FsProperties {
         FsProperties::empty()
     }
-
-    fn sysnode(&self) -> Option<Arc<dyn aster_systree::SysBranchNode>> {
-        None
-    }
 }
 
 pub(super) fn init() {
     let devpts_type = Arc::new(DevPtsType);
-    super::registry::register(devpts_type).unwrap();
+    super::registry::register(devpts_type, None).unwrap();
 }
 
 struct RootInode {

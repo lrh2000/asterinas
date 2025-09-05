@@ -18,5 +18,5 @@ const NAME_MAX: usize = 255;
 
 pub(super) fn init() {
     let ramfs_type = Arc::new(RamFsType);
-    super::registry::register(ramfs_type).unwrap();
+    super::registry::register(ramfs_type, None).unwrap();
 }

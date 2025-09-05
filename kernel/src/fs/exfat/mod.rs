@@ -18,7 +18,7 @@ use crate::fs::exfat::fs::ExfatType;
 
 pub(super) fn init() {
     let exfat_type = Arc::new(ExfatType);
-    super::registry::register(exfat_type).unwrap();
+    super::registry::register(exfat_type, None).unwrap();
 }
 
 #[cfg(ktest)]

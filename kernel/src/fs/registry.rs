@@ -26,17 +26,7 @@ pub trait FsType: Send + Sync + 'static {
         &self,
         args: Option<CString>,
         disk: Option<Arc<dyn BlockDevice>>,
-        ctx: &Context,
     ) -> Result<Arc<dyn FileSystem>>;
-
-    /// Returns a `SysTree` node that represents the FS type.
-    ///
-    /// If a FS type is not intended to appear under SysFs,
-    /// then this method returns a `None`.
-    ///
-    /// The same result will be returned by this method
-    /// when it is called multiple times.
-    fn sysnode(&self) -> Option<Arc<dyn SysBranchNode>>;
 }
 
 bitflags! {
@@ -52,10 +42,13 @@ bitflags! {
 }
 
 /// Registers a new FS type.
+///
+/// If the FS type needs to appear under SysFs, a `SysTree` node
+/// should also be provided. Otherwise, the node can be `None`.
 //
 // TODO: Figure out what should happen when unregistering the FS type.
-pub fn register(new_type: Arc<dyn FsType>) -> Result<()> {
-    FS_REGISTRY.get().unwrap().register(new_type)
+pub fn register(new_type: Arc<dyn FsType>, sysnode: Option<Arc<dyn SysBranchNode>>) -> Result<()> {
+    FS_REGISTRY.get().unwrap().register(new_type, sysnode)
 }
 
 /// Looks up a FS type.
@@ -123,13 +116,17 @@ impl FsRegistry {
     }
 
     /// Registers a file system control interface.
-    fn register(&self, new_type: Arc<dyn FsType>) -> crate::Result<()> {
+    fn register(
+        &self,
+        new_type: Arc<dyn FsType>,
+        sysnode: Option<Arc<dyn SysBranchNode>>,
+    ) -> crate::Result<()> {
         let mut fs_table = self.fs_table.lock();
         if fs_table.contains_key(new_type.name()) {
             return_errno_with_message!(Errno::EEXIST, "the file system type already exists");
         }
 
-        if let Some(node) = new_type.sysnode() {
+        if let Some(node) = sysnode {
             self.systree_fields.add_child(node)?;
         }
 

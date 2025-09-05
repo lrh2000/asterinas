@@ -450,16 +450,11 @@ impl FsType for Ext2Type {
         &self,
         _args: Option<CString>,
         disk: Option<Arc<dyn BlockDevice>>,
-        _ctx: &Context,
     ) -> Result<Arc<dyn FileSystem>> {
         Ext2::open(disk.unwrap()).map(|fs| fs as _)
     }
 
     fn properties(&self) -> FsProperties {
         FsProperties::NEED_DISK
-    }
-
-    fn sysnode(&self) -> Option<Arc<dyn aster_systree::SysBranchNode>> {
-        None
     }
 }

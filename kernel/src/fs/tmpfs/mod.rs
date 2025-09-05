@@ -11,5 +11,5 @@ const TMPFS_MAGIC: u64 = 0x0102_1994;
 
 pub(super) fn init() {
     let ramfs_type = Arc::new(fs::TmpFsType);
-    super::registry::register(ramfs_type).unwrap();
+    super::registry::register(ramfs_type, None).unwrap();
 }

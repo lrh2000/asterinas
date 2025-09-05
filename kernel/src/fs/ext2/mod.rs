@@ -58,5 +58,5 @@ mod xattr;
 
 pub(super) fn init() {
     let ext2_type = Arc::new(Ext2Type);
-    super::registry::register(ext2_type).unwrap();
+    super::registry::register(ext2_type, None).unwrap();
 }
