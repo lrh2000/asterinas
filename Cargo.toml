@@ -1,0 +1,8 @@
+[package]
+name = "sysfs-device-demo"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bytemuck = { version = "1.24.0", features = [ "derive", "extern_crate_alloc" ] }
+bytemuck_derive = "^1.10.2"
