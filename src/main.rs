@@ -222,11 +222,24 @@ mod aster_device {
             let base = BranchFields::new(name, DeviceNode::wrap_weak(weak_self));
             Self { base, dev }
         }
+
+        fn queue_packet(&self, pkt: &[u8]) {
+            println!("DeviceCommon: A packet containing {} bytes has been queued", pkt.len());
+        }
     }
 
     pub trait HasDeviceCommon<M>: Sized + 'static {
         fn device_common(&self) -> &DeviceCommon<Self, M>;
         fn show_attr(&self, name: &str) -> Option<String>;
+
+        /// Transmits a packet.
+        ///
+        /// Returns `None` if the device does not support packet transmission.
+        /// Returns `Some(true)` if the packet is successfully transmitted.
+        /// Returns `Some(false)` if there are insufficient resources for transmission at that time.
+        fn transmit_packet(&self, _pkt: &[u8]) -> Option<bool> {
+            None
+        }
 
         fn wrap(self: Arc<Self>) -> Arc<DeviceNode<Self, M>> {
             DeviceNode::wrap_arc(self)
@@ -264,6 +277,27 @@ mod aster_device {
     impl<M: 'static, T: HasDeviceCommon<M>> ToSysNode for DeviceNode<T, M> {
         fn to_node(self: Arc<Self>) -> Arc<dyn SysNode> {
             self.wrap().to_node()
+        }
+    }
+
+    pub trait Device: ToSysNode {
+        /// Sends a packet.
+        ///
+        /// Depending on the queuing strategy and/or the queue's status on the device, the packet
+        /// may be transmitted immediately or stored in the queue for later transmission.
+        fn send_packet(&self, pkt: &[u8]);
+    }
+
+    impl<M: 'static, T: HasDeviceCommon<M>> Device for DeviceNode<T, M> {
+        fn send_packet(&self, pkt: &[u8]) {
+            let Some(was_transmitted) = self.0.transmit_packet(pkt) else {
+                println!("DeviceNode: Packet transmission is not supported by this device");
+                return;
+            };
+
+            if !was_transmitted {
+                self.0.device_common().queue_packet(pkt);
+            }
         }
     }
 }
@@ -354,7 +388,7 @@ mod examples {
     use std::sync::Arc;
 
     use crate::{
-        aster_device::{DeviceCommon, HasDeviceCommon},
+        aster_device::{Device, DeviceCommon, HasDeviceCommon},
         aster_input::{HasInputDeviceCommon, InputDeviceCommon},
         aster_systree::{SysNode, ToSysNode},
     };
@@ -400,6 +434,17 @@ mod examples {
                 _ => None,
             }
         }
+
+        fn transmit_packet(&self, pkt: &[u8]) -> Option<bool> {
+            if pkt.len() % 2 == 1 {
+                // Resource temporarily unavailable.
+                // Let's try again later.
+                return Some(false);
+            }
+
+            println!("MyDevice: A packet containing {} bytes has been transmitted", pkt.len());
+            Some(true)
+        }
     }
 
     pub struct MyInputDevice {
@@ -433,10 +478,21 @@ mod examples {
 
     pub fn main() {
         let my_device = MyDevice::new();
-        register_node(my_device.wrap().to_node());
+        register_node(my_device.clone().wrap().to_node());
 
         let my_input_device = MyInputDevice::new();
-        register_node(my_input_device.wrap().to_node());
+        register_node(my_input_device.clone().wrap().to_node());
+
+        let dev1: Arc<dyn Device> = my_device.wrap();
+        let dev2 = my_input_device.wrap().wrap();
+
+        println!("\nTry to send some packets to the first device...");
+        dev1.send_packet(b"hello");
+        dev1.send_packet(b"world!");
+
+        println!("\nTry to send some packets to the second device...");
+        dev2.send_packet(b"hello");
+        dev2.send_packet(b"world!");
     }
 }
 
