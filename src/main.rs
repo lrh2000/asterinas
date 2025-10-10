@@ -90,6 +90,7 @@ mod bytemuck_ext {
 mod aster_systree {
     use std::{
         collections::HashMap,
+        marker::PhantomData,
         sync::{Arc, RwLock, Weak},
     };
 
@@ -128,22 +129,23 @@ mod aster_systree {
         }
     }
 
-    pub trait HasBranchFields: Sized + 'static {
+    pub trait HasBranchFields<M>: Sized + 'static {
         type Child: ToSysNode + ?Sized;
 
         fn branch_fields(&self) -> &BranchFields<Self, Self::Child>;
         fn show_attr(&self, name: &str) -> Option<String>;
 
-        fn wrap(self: Arc<Self>) -> Arc<BranchNode<Self>> {
+        fn wrap(self: Arc<Self>) -> Arc<BranchNode<Self, M>> {
             BranchNode::wrap_arc(self)
         }
     }
 
     #[repr(transparent)]
     #[derive(TransparentWrapper)]
-    pub struct BranchNode<T>(T);
+    #[transparent(T)]
+    pub struct BranchNode<T, M>(T, PhantomData<M>);
 
-    impl<T: HasBranchFields> SysNode for BranchNode<T> {
+    impl<M: 'static, T: HasBranchFields<M>> SysNode for BranchNode<T, M> {
         fn name(&self) -> &str {
             &self.0.branch_fields().name
         }
@@ -159,7 +161,7 @@ mod aster_systree {
         }
     }
 
-    impl<T: HasBranchFields> SysBranch for BranchNode<T> {
+    impl<M: 'static, T: HasBranchFields<M>> SysBranch for BranchNode<T, M> {
         fn get_child(&self, name: &str) -> Option<Arc<dyn SysNode>> {
             let children = self.0.branch_fields().children.read().ok()?;
             Some(children.get(name)?.clone().to_node())
@@ -190,7 +192,10 @@ mod aster_systree {
 // ================================ Device nodes
 
 mod aster_device {
-    use std::sync::{Arc, Weak};
+    use std::{
+        marker::PhantomData,
+        sync::{Arc, Weak},
+    };
 
     use bytemuck::{TransparentWrapper, TransparentWrapperAlloc};
 
@@ -199,12 +204,12 @@ mod aster_device {
         bytemuck_ext::TransparentWrapperExt,
     };
 
-    pub struct DeviceCommon<Self_> {
-        base: BranchFields<DeviceNode<Self_>, dyn SysNode>,
+    pub struct DeviceCommon<Self_, M> {
+        base: BranchFields<DeviceNode<Self_, M>, dyn SysNode>,
         dev: Option<(u16, u16)>,
     }
 
-    impl<Self_> DeviceCommon<Self_> {
+    impl<Self_, M> DeviceCommon<Self_, M> {
         pub fn new(name: String, weak_self: Weak<Self_>) -> Self {
             Self::__new(name, weak_self, None)
         }
@@ -219,20 +224,21 @@ mod aster_device {
         }
     }
 
-    pub trait HasDeviceCommon: Sized + 'static {
-        fn device_common(&self) -> &DeviceCommon<Self>;
+    pub trait HasDeviceCommon<M>: Sized + 'static {
+        fn device_common(&self) -> &DeviceCommon<Self, M>;
         fn show_attr(&self, name: &str) -> Option<String>;
 
-        fn wrap(self: Arc<Self>) -> Arc<DeviceNode<Self>> {
+        fn wrap(self: Arc<Self>) -> Arc<DeviceNode<Self, M>> {
             DeviceNode::wrap_arc(self)
         }
     }
 
     #[repr(transparent)]
     #[derive(TransparentWrapper)]
-    pub struct DeviceNode<T>(T);
+    #[transparent(T)]
+    pub struct DeviceNode<T, M>(T, PhantomData<M>);
 
-    impl<T: HasDeviceCommon> HasBranchFields for DeviceNode<T> {
+    impl<M: 'static, T: HasDeviceCommon<M>> HasBranchFields<M> for DeviceNode<T, M> {
         type Child = dyn SysNode;
 
         fn branch_fields(&self) -> &BranchFields<Self, Self::Child> {
@@ -255,7 +261,7 @@ mod aster_device {
         }
     }
 
-    impl<T: HasDeviceCommon> ToSysNode for DeviceNode<T> {
+    impl<M: 'static, T: HasDeviceCommon<M>> ToSysNode for DeviceNode<T, M> {
         fn to_node(self: Arc<Self>) -> Arc<dyn SysNode> {
             self.wrap().to_node()
         }
@@ -265,7 +271,10 @@ mod aster_device {
 // ================================ Input device nodes
 
 mod aster_input {
-    use std::sync::{Arc, Weak};
+    use std::{
+        marker::PhantomData,
+        sync::{Arc, Weak},
+    };
 
     use crate::{
         aster_device::{DeviceCommon, HasDeviceCommon},
@@ -275,14 +284,14 @@ mod aster_input {
 
     use bytemuck::{TransparentWrapper, TransparentWrapperAlloc};
 
-    pub struct InputDeviceCommon<Self_> {
-        base: DeviceCommon<InputDeviceNode<Self_>>,
+    pub struct InputDeviceCommon<Self_, M> {
+        base: DeviceCommon<InputDeviceNode<Self_, M>, M>,
         name: String,
         phys: String,
         uniq: String,
     }
 
-    impl<Self_> InputDeviceCommon<Self_> {
+    impl<Self_, M> InputDeviceCommon<Self_, M> {
         pub fn new(
             name: String,
             weak_self: Weak<Self_>,
@@ -300,21 +309,22 @@ mod aster_input {
         }
     }
 
-    pub trait HasInputDeviceCommon: Sized + 'static {
-        fn input_device_common(&self) -> &InputDeviceCommon<Self>;
+    pub trait HasInputDeviceCommon<M>: Sized + 'static {
+        fn input_device_common(&self) -> &InputDeviceCommon<Self, M>;
         fn show_attr(&self, name: &str) -> Option<String>;
 
-        fn wrap(self: Arc<Self>) -> Arc<InputDeviceNode<Self>> {
+        fn wrap(self: Arc<Self>) -> Arc<InputDeviceNode<Self, M>> {
             InputDeviceNode::wrap_arc(self)
         }
     }
 
     #[repr(transparent)]
     #[derive(TransparentWrapper)]
-    pub struct InputDeviceNode<T>(T);
+    #[transparent(T)]
+    pub struct InputDeviceNode<T, M>(T, PhantomData<M>);
 
-    impl<T: HasInputDeviceCommon> HasDeviceCommon for InputDeviceNode<T> {
-        fn device_common(&self) -> &DeviceCommon<Self> {
+    impl<M: 'static, T: HasInputDeviceCommon<M>> HasDeviceCommon<M> for InputDeviceNode<T, M> {
+        fn device_common(&self) -> &DeviceCommon<Self, M> {
             &self.0.input_device_common().base
         }
 
@@ -331,7 +341,7 @@ mod aster_input {
         }
     }
 
-    impl<T: HasInputDeviceCommon> ToSysNode for InputDeviceNode<T> {
+    impl<M: 'static, T: HasInputDeviceCommon<M>> ToSysNode for InputDeviceNode<T, M> {
         fn to_node(self: Arc<Self>) -> Arc<dyn SysNode> {
             self.wrap().to_node()
         }
@@ -363,12 +373,14 @@ mod examples {
         }
     }
 
-    struct MyDevice {
-        base: DeviceCommon<Self>,
+    enum PrivateMarker {}
+
+    pub struct MyDevice {
+        base: DeviceCommon<Self, PrivateMarker>,
     }
 
     impl MyDevice {
-        fn new() -> Arc<Self> {
+        pub fn new() -> Arc<Self> {
             Arc::new_cyclic(|weak_self| {
                 let base =
                     DeviceCommon::new_char("my_device".to_owned(), weak_self.clone(), 10, 20);
@@ -377,8 +389,8 @@ mod examples {
         }
     }
 
-    impl HasDeviceCommon for MyDevice {
-        fn device_common(&self) -> &DeviceCommon<Self> {
+    impl HasDeviceCommon<PrivateMarker> for MyDevice {
+        fn device_common(&self) -> &DeviceCommon<Self, PrivateMarker> {
             &self.base
         }
 
@@ -390,12 +402,12 @@ mod examples {
         }
     }
 
-    struct MyInputDevice {
-        base: InputDeviceCommon<Self>,
+    pub struct MyInputDevice {
+        base: InputDeviceCommon<Self, PrivateMarker>,
     }
 
     impl MyInputDevice {
-        fn new() -> Arc<Self> {
+        pub fn new() -> Arc<Self> {
             Arc::new_cyclic(|weak_self| {
                 let base = InputDeviceCommon::new(
                     "input3".to_owned(),
@@ -409,8 +421,8 @@ mod examples {
         }
     }
 
-    impl HasInputDeviceCommon for MyInputDevice {
-        fn input_device_common(&self) -> &InputDeviceCommon<Self> {
+    impl HasInputDeviceCommon<PrivateMarker> for MyInputDevice {
+        fn input_device_common(&self) -> &InputDeviceCommon<Self, PrivateMarker> {
             &self.base
         }
 
@@ -430,4 +442,13 @@ mod examples {
 
 fn main() {
     examples::main();
+
+    #[expect(unused_imports, unused_variables)]
+    {
+        use aster_device::HasDeviceCommon;
+
+        let my_device = examples::MyDevice::new();
+        // my_device.device_common();
+        // ^| ERROR: type `PrivateMarker` is private
+    }
 }
