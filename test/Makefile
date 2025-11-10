@@ -48,9 +48,9 @@ endif
 all: build
 
 .PHONY: build
-ifeq ($(OSDK_TARGET_ARCH), loongarch64)
+ifeq ($(OSDK_TARGET_ARCH), aarch64)
 build: $(EXT2_IMAGE) $(EXFAT_IMAGE)
-	@echo "For loongarch, we generate a fake initramfs to successfully test or build."
+	@echo "For aarch64, we generate a fake initramfs to successfully test or build."
 	@touch $(INITRAMFS_IMAGE)
 else
 build: $(INITRAMFS_IMAGE) $(EXT2_IMAGE) $(EXFAT_IMAGE)
