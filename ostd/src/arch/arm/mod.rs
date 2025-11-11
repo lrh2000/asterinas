@@ -66,12 +66,22 @@ pub(crate) unsafe fn init_on_ap() {
 
 /// Returns the frequency of TSC. The unit is Hz.
 pub fn tsc_freq() -> u64 {
-    unimplemented!()
+    use core::arch::asm;
+
+    let cntfrq;
+    // SAFETY: It is safe to read a time-related counter.
+    unsafe { asm!("mrs {}, cntfrq_el0", out(reg) cntfrq) };
+    cntfrq
 }
 
 /// Reads the current value of the processor's time-stamp counter (TSC).
 pub fn read_tsc() -> u64 {
-    unimplemented!()
+    use core::arch::asm;
+
+    let cntvct;
+    // SAFETY: It is safe to read a time-related counter.
+    unsafe { asm!("mrs {}, cntvct_el0", out(reg) cntvct) };
+    cntvct
 }
 
 /// Reads a hardware generated 64-bit random value.
