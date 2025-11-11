@@ -42,7 +42,7 @@ fn get_random_seed() -> <StdRng as SeedableRng>::Seed {
     seed
 }
 
-#[cfg(not(target_arch = "x86_64"))]
+#[cfg(any(target_arch = "riscv64", target_arch = "loongarch64"))]
 fn get_random_seed() -> <StdRng as SeedableRng>::Seed {
     use ostd::arch::boot::DEVICE_TREE;
 
@@ -54,4 +54,10 @@ fn get_random_seed() -> <StdRng as SeedableRng>::Seed {
         .try_into()
         .unwrap();
     seed
+}
+
+#[cfg(target_arch = "aarch64")]
+fn get_random_seed() -> <StdRng as SeedableRng>::Seed {
+    // TODO: Figure out how to generate the random seed here.
+    Default::default()
 }

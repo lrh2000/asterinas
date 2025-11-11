@@ -2,9 +2,13 @@
 
 //! Interrupt operations.
 
+use core::arch::asm;
+
 // FIXME: Mark this as unsafe. See
 // <https://github.com/asterinas/asterinas/issues/1120#issuecomment-2748696592>.
-pub(crate) fn enable_local() {}
+pub(crate) fn enable_local() {
+    unsafe { asm!("msr daifclr, 0b0010") };
+}
 
 /// Enables local IRQs and halts the CPU to wait for interrupts.
 ///
@@ -15,13 +19,16 @@ pub(crate) fn enable_local() {}
 // FIXME: Mark this as unsafe. See
 // <https://github.com/asterinas/asterinas/issues/1120#issuecomment-2748696592>.
 pub(crate) fn enable_local_and_halt() {
-    unimplemented!()
+    enable_local();
+    // TODO: We should put the CPU into the idle state.
 }
 
 pub(crate) fn disable_local() {
-    unimplemented!()
+    unsafe { asm!("msr daifset, 0b0010") };
 }
 
 pub(crate) fn is_local_enabled() -> bool {
-    false
+    let daif: usize;
+    unsafe { asm!("mrs {}, daif", out(reg) daif) };
+    daif & 0b0010 == 0
 }
