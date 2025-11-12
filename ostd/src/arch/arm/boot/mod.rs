@@ -94,6 +94,13 @@ fn parse_memory_regions() -> MemoryRegionArray {
             .unwrap();
     }
 
+    let fdt = DEVICE_TREE.get().unwrap();
+    regions.push(MemoryRegion::new(
+        0x4000_0000,
+        fdt.total_size(),
+        MemoryRegionType::Module,
+    ));
+
     regions.into_non_overlapping()
 }
 

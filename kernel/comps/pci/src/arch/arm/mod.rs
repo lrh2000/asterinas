@@ -38,6 +38,10 @@ pub(crate) fn has_pci_bus() -> bool {
 }
 
 pub(crate) fn init() {
+    if true {
+        return;
+    }
+
     // We follow the Linux's PCI device tree to obtain the register information
     // about the PCI bus. See also the specification at
     // <https://www.kernel.org/doc/Documentation/devicetree/bindings/pci/host-generic-pci.txt>.

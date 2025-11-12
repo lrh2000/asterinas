@@ -120,6 +120,8 @@ impl<SecuritySensitivity> IoMem<SecuritySensitivity> {
         // physical address range is I/O memory, so it is safe to map.
         let kva = unsafe { KVirtArea::map_untracked_frames(area_size, 0, frames_range, prop) };
 
+        crate::arch::mm::tlb_flush_all_including_global();
+
         Self {
             kvirt_area: Arc::new(kva),
             offset: range.start - first_page_start,

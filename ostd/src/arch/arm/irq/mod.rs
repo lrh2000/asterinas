@@ -2,10 +2,12 @@
 
 //! Interrupts.
 
+pub(super) mod chip;
 mod ipi;
 mod ops;
 mod remapping;
 
+pub use chip::{InterruptSourceInFdt, IrqChip, MappedIrqLine, IRQ_CHIP};
 pub(crate) use ipi::{send_ipi, HwCpuId};
 pub(crate) use ops::{disable_local, enable_local, enable_local_and_halt, is_local_enabled};
 pub(crate) use remapping::IrqRemapping;

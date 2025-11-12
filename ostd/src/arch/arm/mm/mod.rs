@@ -99,7 +99,7 @@ pub(crate) fn tlb_flush_all_including_global() {
 /// The caller must ensure that the virtual address range and DMA direction correspond correctly to
 /// a DMA region.
 pub(crate) unsafe fn sync_dma_range(range: Range<Vaddr>, direction: DmaDirection) {
-    unimplemented!()
+    // FIXME: Implement this
 }
 
 #[derive(Clone, Copy, Pod, Default)]
