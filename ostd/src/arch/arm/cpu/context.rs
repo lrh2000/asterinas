@@ -9,8 +9,12 @@ use core::{
 };
 
 use crate::{
-    arch::trap::{RawUserContext, TrapFrame},
+    arch::{
+        irq::IRQ_CHIP,
+        trap::{RawUserContext, TrapFrame},
+    },
     cpu::PrivilegeLevel,
+    irq::call_irq_callback_functions,
     user::{ReturnReason, UserContextApi, UserContextApiInternal},
 };
 
@@ -199,6 +203,17 @@ impl UserContextApiInternal for UserContext {
                     crate::arch::irq::enable_local();
                     self.exception = Some(exception);
                     break ReturnReason::UserException;
+                }
+                Some(CpuTrap::Interrupt) => {
+                    let irq_chip = IRQ_CHIP.get().unwrap();
+                    while let Some(hw_irq_line) = irq_chip.claim_interrupt() {
+                        call_irq_callback_functions(
+                            &self.as_trap_frame(),
+                            &hw_irq_line,
+                            PrivilegeLevel::User,
+                        );
+                    }
+                    crate::arch::irq::enable_local();
                 }
                 _ => panic!(
                     "Cannot handle user CPU exception: {:?}, trapframe: {:#?}",

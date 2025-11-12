@@ -12,9 +12,10 @@ pub use trap::TrapFrame;
 use crate::{
     arch::{
         cpu::context::{CpuException, CpuTrap},
-        irq::{HwIrqLine, PSTATE_I, disable_local, enable_local},
+        irq::{HwIrqLine, IRQ_CHIP, PSTATE_I, disable_local, enable_local},
     },
     cpu::{CpuId, PrivilegeLevel},
+    irq::call_irq_callback_functions,
     mm::MAX_USERSPACE_VADDR,
 };
 
@@ -58,6 +59,12 @@ extern "C" fn trap_handler(f: &mut TrapFrame) {
             enable_local_if(was_irq_enabled);
             crate::mm::fault::handle_user_page_fault(f, &data_abort, address);
             disable_local_if(was_irq_enabled);
+        }
+        Some(CpuTrap::Interrupt) => {
+            let irq_chip = IRQ_CHIP.get().unwrap();
+            while let Some(hw_irq_line) = irq_chip.claim_interrupt() {
+                call_irq_callback_functions(f, &hw_irq_line, PrivilegeLevel::Kernel);
+            }
         }
         _ => panic!(
             "Cannot handle kernel CPU exception: {:?}, trapframe: {:#?}",
