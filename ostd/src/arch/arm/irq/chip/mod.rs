@@ -8,6 +8,7 @@ use core::{
 use gicv3::Gic;
 use spin::Once;
 
+use super::HwIrqLine;
 use crate::{arch::boot::DEVICE_TREE, io::IoMemAllocatorBuilder, irq::IrqLine, Result};
 
 mod gicv3;
@@ -61,6 +62,16 @@ impl IrqChip {
     fn unmap_irq_line(&self, mapped_irq_line: &MappedIrqLine) {
         self.gic
             .unmap_interrupt_source(mapped_irq_line.interrupt_source_on_chip);
+    }
+
+    /// Claims a pending interrupt.
+    pub(in crate::arch) fn claim_interrupt(&self) -> Option<HwIrqLine> {
+        self.gic.claim_interrupt()
+    }
+
+    /// Completes an active interrupt.
+    pub(super) fn complete_interrupt(&self, interrupt_source: InterruptSourceOnChip) {
+        self.gic.complete_interrupt(interrupt_source);
     }
 }
 

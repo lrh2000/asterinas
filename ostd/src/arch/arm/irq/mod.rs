@@ -24,6 +24,7 @@ pub(crate) const IRQ_NUM_MAX: u8 = 255;
 /// mechanism (e.g., PLIC).
 pub(crate) struct HwIrqLine {
     irq_num: u8,
+    source: chip::InterruptSourceOnChip,
 }
 
 impl HwIrqLine {
@@ -32,6 +33,6 @@ impl HwIrqLine {
     }
 
     pub(crate) fn ack(&self) {
-        unimplemented!()
+        IRQ_CHIP.get().unwrap().complete_interrupt(self.source);
     }
 }

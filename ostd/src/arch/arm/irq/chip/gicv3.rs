@@ -3,6 +3,7 @@
 use alloc::{boxed::Box, vec, vec::Vec};
 use core::{
     arch::asm,
+    ops::Range,
     sync::atomic::{AtomicU8, Ordering},
 };
 
@@ -10,6 +11,7 @@ use fdt::Fdt;
 
 use super::{InterruptSourceInFdt, InterruptSourceOnChip};
 use crate::{
+    arch::irq::HwIrqLine,
     io::{IoMem, IoMemAllocatorBuilder, Sensitive},
     irq::IrqLine,
     sync::{LocalIrqDisabled, SpinLock},
@@ -180,6 +182,32 @@ impl Gic {
         };
 
         self.interrupt_number_mappings[intid as usize].store(0xFF, Ordering::Relaxed);
+    }
+
+    pub(super) fn claim_interrupt(&self) -> Option<HwIrqLine> {
+        const RESERVED_INTIDS: Range<usize> = 1020..1024;
+
+        let iar1: usize;
+        unsafe { asm!("mrs {}, icc_iar1_el1", out(reg) iar1) };
+
+        if RESERVED_INTIDS.contains(&iar1) {
+            return None;
+        }
+
+        let irq_num = self.interrupt_number_mappings[iar1].load(Ordering::Relaxed);
+        Some(HwIrqLine {
+            irq_num,
+            source: InterruptSourceOnChip {
+                interrupt_parent: self.phandle,
+                interrupt: iar1 as u32,
+            },
+        })
+    }
+
+    pub(super) fn complete_interrupt(&self, interrupt_source: InterruptSourceOnChip) {
+        assert_eq!(interrupt_source.interrupt_parent, self.phandle);
+
+        unsafe { asm!("msr icc_eoir1_el1, {}", in(reg) interrupt_source.interrupt) }
     }
 }
 

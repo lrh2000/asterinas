@@ -3,19 +3,15 @@
 //! CPU execution context control.
 
 use alloc::boxed::Box;
-use core::{arch::global_asm, fmt::Debug};
+use core::{
+    arch::{asm, global_asm},
+    fmt::Debug,
+};
 
 use crate::{
     arch::trap::{RawUserContext, TrapFrame},
     user::{ReturnReason, UserContextApi, UserContextApiInternal},
 };
-
-/// CPU exception type.
-#[derive(Clone, Copy, Debug)]
-#[repr(C)]
-pub enum CpuException {
-    Unknown,
-}
 
 /// Userspace CPU context, including general-purpose registers and exception information.
 #[derive(Clone, Default, Debug)]
@@ -63,6 +59,97 @@ pub struct GeneralRegs {
     // put here deliberately for ease of asm
     pub x0: usize,
     // x31 means special
+}
+
+/// ARM CPU exceptions.
+///
+/// Every enum variant corresponds to one exception defined by the ARM
+/// architecture.
+#[derive(Clone, Debug)]
+pub enum CpuException {
+    Unknown,
+    WfiInstruction,
+    SimdInstruction,
+    IllegalState,
+    SvcInstruction,
+    SystemInstruction,
+    InstructionAbort(FaultAddress),
+    PcAlignmentFault,
+    DataReadAbort(FaultAddress),
+    DataWriteAbort(FaultAddress),
+    SpAlignmentFault,
+    FpuInstruction,
+    Breakpoint,
+    SoftwareStep,
+    Watchpoint,
+    BrkInstruction,
+}
+
+/// Data address of data access exceptions.
+pub type FaultAddress = usize;
+
+#[derive(Clone, Debug)]
+pub(in crate::arch) enum CpuTrap {
+    Exception(CpuException),
+    Interrupt,
+    FastInterrupt,
+    Error,
+}
+
+impl CpuTrap {
+    pub(in crate::arch) fn new(trap_num: usize) -> Option<Self> {
+        match trap_num >> 16 {
+            // 0: Synchronous
+            0 => (),
+            // 1: IRQ or vIRQ
+            1 => return Some(Self::Interrupt),
+            // 2: FIQ or vFIQ
+            2 => return Some(Self::FastInterrupt),
+            // 3: SError or vSError
+            3 => return Some(Self::Error),
+
+            _ => return None,
+        }
+
+        let esr_el1: usize;
+        unsafe { asm!("mrs {}, esr_el1", out(reg) esr_el1) };
+
+        fn fault_address() -> usize {
+            let far_el1;
+            unsafe { asm!("mrs {}, far_el1", out(reg) far_el1) };
+            far_el1
+        }
+
+        // WnR, bit [6]: Write not Read.
+        const WNR: usize = 1 << 6;
+
+        // EC, bits[31:26]: The Exception class field.
+        let exception = match esr_el1 >> 26 {
+            0b000001 => CpuException::WfiInstruction,
+            0b000111 => CpuException::SimdInstruction,
+            0b001110 => CpuException::IllegalState,
+            0b010101 => CpuException::SvcInstruction,
+            0b011000 => CpuException::SystemInstruction,
+            0b100000 | 0b100001 => CpuException::InstructionAbort(fault_address()),
+            0b100010 => CpuException::PcAlignmentFault,
+            0b100100 | 0b100101 => {
+                if esr_el1 & WNR != 0 {
+                    CpuException::DataWriteAbort(fault_address())
+                } else {
+                    CpuException::DataReadAbort(fault_address())
+                }
+            }
+            0b100110 => CpuException::SpAlignmentFault,
+            0b101100 => CpuException::FpuInstruction,
+            0b110000 | 0b110001 => CpuException::Breakpoint,
+            0b110010 | 0b110011 => CpuException::SoftwareStep,
+            0b110100 | 0b110101 => CpuException::Watchpoint,
+            0b111100 => CpuException::BrkInstruction,
+
+            0b000000 | _ => CpuException::Unknown,
+        };
+        Some(Self::Exception(exception))
+    }
 }
 
 impl UserContext {

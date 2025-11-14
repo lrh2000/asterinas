@@ -9,9 +9,10 @@ use spin::Once;
 pub(super) use trap::RawUserContext;
 pub use trap::TrapFrame;
 
+use super::irq::IRQ_CHIP;
 use crate::{
     arch::{
-        cpu::context::CpuException,
+        cpu::context::{CpuException, CpuTrap},
         irq::{disable_local, enable_local, HwIrqLine},
     },
     cpu::{CpuId, PrivilegeLevel},
@@ -30,7 +31,24 @@ pub(crate) unsafe fn init() {
 /// Handle traps (only from kernel).
 #[no_mangle]
 extern "C" fn trap_handler(f: &mut TrapFrame) {
-    unimplemented!()
+    let trap = CpuTrap::new(f.trap_num);
+
+    let exception = match trap {
+        Some(CpuTrap::Exception(exception)) => exception,
+        Some(CpuTrap::Interrupt) => {
+            let irq_chip = IRQ_CHIP.get().unwrap();
+            while let Some(hw_irq_line) = irq_chip.claim_interrupt() {
+                call_irq_callback_functions(f, &hw_irq_line, PrivilegeLevel::Kernel);
+            }
+            return;
+        }
+        _ => panic!("Cannot handle kernel trap: {:?}, trapframe: {:#?}", trap, f),
+    };
+
+    panic!(
+        "Cannot handle kernel exception: {:?}, trapframe: {:#?}",
+        exception, f
+    );
 }
 
 #[expect(clippy::type_complexity)]
