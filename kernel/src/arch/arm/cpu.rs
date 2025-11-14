@@ -3,7 +3,7 @@
 use core::fmt;
 
 use ostd::{
-    arch::cpu::context::UserContext,
+    arch::cpu::context::{CpuException, UserContext},
     cpu::PinCurrentCpu,
     task::DisabledPreemptGuard,
     user::UserContextApi,
@@ -122,6 +122,28 @@ impl SigContext {
         self.sp = src.stack_pointer() as u64;
         self.pc = src.instruction_pointer() as u64;
         self.pstate = src.process_state() as u64;
+    }
+}
+
+impl TryFrom<&CpuException> for PageFaultInfo {
+    // [`Err`] indicates that the [`CpuException`] is not a page fault, with no
+    // additional error information.
+    type Error = ();
+
+    fn try_from(value: &CpuException) -> Result<Self, ()> {
+        let (addr, required_perms) = match value {
+            CpuException::InstructionAbort { address } => (address, VmPerms::READ | VmPerms::EXEC),
+            CpuException::DataAbort { is_write, address } => (
+                address,
+                if *is_write {
+                    VmPerms::READ | VmPerms::WRITE
+                } else {
+                    VmPerms::READ
+                },
+            ),
+            _ => return Err(()),
+        };
+        Ok(PageFaultInfo::new(*addr, required_perms))
     }
 }
 
