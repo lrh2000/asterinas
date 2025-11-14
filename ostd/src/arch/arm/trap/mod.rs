@@ -9,7 +9,14 @@ use spin::Once;
 pub(super) use trap::RawUserContext;
 pub use trap::TrapFrame;
 
-use crate::arch::cpu::context::CpuException;
+use crate::{
+    arch::{
+        cpu::context::{CpuException, CpuTrap},
+        irq::{HwIrqLine, PSTATE_I, disable_local, enable_local},
+    },
+    cpu::{CpuId, PrivilegeLevel},
+    mm::MAX_USERSPACE_VADDR,
+};
 
 /// Initializes interrupt handling on ARM.
 ///
@@ -29,5 +36,32 @@ pub(crate) unsafe fn init_on_cpu() {
 // SAFETY: The name does not collide with other symbols.
 #[unsafe(no_mangle)]
 extern "C" fn trap_handler(f: &mut TrapFrame) {
-    unimplemented!()
+    fn enable_local_if(cond: bool) {
+        if cond {
+            enable_local();
+        }
+    }
+
+    fn disable_local_if(cond: bool) {
+        if cond {
+            disable_local();
+        }
+    }
+
+    // The IRQ state before trapping. We need to ensure that the IRQ state
+    // during exception handling is consistent with the state before the trap.
+    let was_irq_enabled = f.spsr & PSTATE_I == 0;
+
+    let trap = CpuTrap::new(f.trap_num);
+    match trap {
+        Some(CpuTrap::Exception(data_abort @ CpuException::DataAbort { address, .. })) => {
+            enable_local_if(was_irq_enabled);
+            crate::mm::fault::handle_user_page_fault(f, &data_abort, address);
+            disable_local_if(was_irq_enabled);
+        }
+        _ => panic!(
+            "Cannot handle kernel CPU exception: {:?}, trapframe: {:#?}",
+            trap, f
+        ),
+    }
 }

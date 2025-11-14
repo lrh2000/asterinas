@@ -129,7 +129,19 @@ impl TryFrom<&CpuException> for PageFaultInfo {
     type Error = ();
 
     fn try_from(value: &CpuException) -> Result<Self, ()> {
-        unimplemented!()
+        let (addr, required_perms) = match value {
+            CpuException::InstructionAbort { address } => (address, VmPerms::READ | VmPerms::EXEC),
+            CpuException::DataAbort { is_write, address } => (
+                address,
+                if *is_write {
+                    VmPerms::READ | VmPerms::WRITE
+                } else {
+                    VmPerms::READ
+                },
+            ),
+            _ => return Err(()),
+        };
+        Ok(PageFaultInfo::new(*addr, required_perms))
     }
 }
 

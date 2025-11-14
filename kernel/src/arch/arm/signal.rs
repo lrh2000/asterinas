@@ -20,6 +20,39 @@ impl SignalContext for UserContext {
 
 impl ToFaultSignal for CpuException {
     fn to_fault_signal(&self, user_ctx: &UserContext) -> Option<FaultSignal> {
-        unimplemented!()
+        use crate::process::signal::constants::*;
+
+        let elr = user_ctx.instruction_pointer() as u64;
+
+        let (num, code, addr) = match self {
+            CpuException::Unknown
+            | CpuException::WfiInstruction
+            | CpuException::FpuInstruction
+            | CpuException::IllegalState
+            | CpuException::SystemInstruction => (SIGILL, ILL_ILLOPC, Some(elr)),
+            CpuException::InstructionAbort { address }
+            | CpuException::DataAbort { address, .. } => {
+                // FIXME: Derive the signal number and code from the error code.
+                // See <https://elixir.bootlin.com/linux/v7.0/source/arch/arm64/mm/fault.c#L861>.
+                (SIGSEGV, SEGV_MAPERR, Some(*address as u64))
+            }
+            CpuException::PcAlignmentFault => (SIGBUS, BUS_ADRALN, Some(elr)),
+            CpuException::SpAlignmentFault => {
+                (SIGBUS, BUS_ADRALN, Some(user_ctx.stack_pointer() as u64))
+            }
+            CpuException::FpuException => {
+                // TODO: Derive the code from the floating-point status.
+                (SIGFPE, FPE_FLTDIV, Some(elr))
+            }
+            CpuException::SoftwareStep => (SIGTRAP, TRAP_TRACE, Some(elr)),
+            CpuException::BrkInstruction => (SIGTRAP, TRAP_BRKPT, Some(elr)),
+
+            CpuException::SvcInstruction
+            | CpuException::SErrorInterrupt
+            | CpuException::Breakpoint
+            | CpuException::Watchpoint => return None,
+        };
+
+        Some(FaultSignal::new(num, code, addr))
     }
 }
