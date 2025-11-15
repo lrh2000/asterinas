@@ -81,4 +81,15 @@ pub fn read_random() -> Option<u64> {
     None
 }
 
-pub(crate) fn enable_cpu_features() {}
+pub(crate) fn enable_cpu_features() {
+    use core::arch::asm;
+
+    unsafe {
+        asm!(
+            "mrs {tmp}, cpacr_el1",
+            "orr {tmp}, {tmp}, #(3 << 20)",
+            "msr cpacr_el1, {tmp}",
+            tmp = out(reg) _,
+        );
+    }
+}

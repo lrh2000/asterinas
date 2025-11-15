@@ -31,7 +31,8 @@ impl Read for BoxedReader<'_> {
 
 /// Unpack and prepare the rootfs from the initramfs CPIO buffer.
 pub fn init_in_first_kthread(fs_resolver: &FsResolver) -> Result<()> {
-    let initramfs_buf = boot_info().initramfs.expect("No initramfs found!");
+    // let initramfs_buf = boot_info().initramfs.expect("No initramfs found!");
+    let initramfs_buf = include_bytes!("../../../busybox/initrd.cpio.gz").as_slice();
 
     let reader = {
         let mut initramfs_suffix = "";

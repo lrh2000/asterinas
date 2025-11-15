@@ -45,10 +45,17 @@ extern "C" fn trap_handler(f: &mut TrapFrame) {
         _ => panic!("Cannot handle kernel trap: {:?}, trapframe: {:#?}", trap, f),
     };
 
-    panic!(
-        "Cannot handle kernel exception: {:?}, trapframe: {:#?}",
-        exception, f
-    );
+    match exception {
+        CpuException::DataAbort { address, .. } if (0..MAX_USERSPACE_VADDR).contains(&address) => {
+            handle_user_page_fault(f, &exception);
+        }
+        _ => {
+            panic!(
+                "Cannot handle kernel exception: {:?}, trapframe: {:#?}",
+                exception, f
+            );
+        }
+    }
 }
 
 #[expect(clippy::type_complexity)]

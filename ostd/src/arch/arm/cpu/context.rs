@@ -9,7 +9,12 @@ use core::{
 };
 
 use crate::{
-    arch::trap::{RawUserContext, TrapFrame},
+    arch::{
+        irq::IRQ_CHIP,
+        trap::{RawUserContext, TrapFrame},
+    },
+    cpu::PrivilegeLevel,
+    irq::call_irq_callback_functions,
     user::{ReturnReason, UserContextApi, UserContextApiInternal},
 };
 
@@ -69,31 +74,28 @@ pub struct GeneralRegs {
 pub enum CpuException {
     Unknown,
     WfiInstruction,
-    SimdInstruction,
+    FpuInstruction,
     IllegalState,
     SvcInstruction,
     SystemInstruction,
-    InstructionAbort(FaultAddress),
+    InstructionAbort { address: usize },
     PcAlignmentFault,
-    DataReadAbort(FaultAddress),
-    DataWriteAbort(FaultAddress),
+    DataAbort { is_write: bool, address: usize },
     SpAlignmentFault,
-    FpuInstruction,
+    FpuException,
+    SErrorInterrupt,
     Breakpoint,
     SoftwareStep,
     Watchpoint,
     BrkInstruction,
 }
 
-/// Data address of data access exceptions.
-pub type FaultAddress = usize;
-
 #[derive(Clone, Debug)]
 pub(in crate::arch) enum CpuTrap {
     Exception(CpuException),
     Interrupt,
     FastInterrupt,
-    Error,
+    SError,
 }
 
 impl CpuTrap {
@@ -106,7 +108,7 @@ impl CpuTrap {
             // 2: FIQ or vFIQ
             2 => return Some(Self::FastInterrupt),
             // 3: SError or vSError
-            3 => return Some(Self::Error),
+            3 => return Some(Self::SError),
 
             _ => return None,
         }
@@ -126,21 +128,21 @@ impl CpuTrap {
         // EC, bits[31:26]: The Exception class field.
         let exception = match esr_el1 >> 26 {
             0b000001 => CpuException::WfiInstruction,
-            0b000111 => CpuException::SimdInstruction,
+            0b000111 => CpuException::FpuInstruction,
             0b001110 => CpuException::IllegalState,
             0b010101 => CpuException::SvcInstruction,
             0b011000 => CpuException::SystemInstruction,
-            0b100000 | 0b100001 => CpuException::InstructionAbort(fault_address()),
+            0b100000 | 0b100001 => CpuException::InstructionAbort {
+                address: fault_address(),
+            },
             0b100010 => CpuException::PcAlignmentFault,
-            0b100100 | 0b100101 => {
-                if esr_el1 & WNR != 0 {
-                    CpuException::DataWriteAbort(fault_address())
-                } else {
-                    CpuException::DataReadAbort(fault_address())
-                }
-            }
+            0b100100 | 0b100101 => CpuException::DataAbort {
+                is_write: esr_el1 & WNR != 0,
+                address: fault_address(),
+            },
             0b100110 => CpuException::SpAlignmentFault,
             0b101100 => CpuException::FpuInstruction,
+            0b101111 => CpuException::SErrorInterrupt,
             0b110000 | 0b110001 => CpuException::Breakpoint,
             0b110010 | 0b110011 => CpuException::SoftwareStep,
             0b110100 | 0b110101 => CpuException::Watchpoint,
@@ -190,7 +192,45 @@ impl UserContextApiInternal for UserContext {
     where
         F: FnMut() -> bool,
     {
-        unimplemented!()
+        loop {
+            crate::task::scheduler::might_preempt();
+            self.user_context.run();
+
+            let trap = CpuTrap::new(self.user_context.trap_num);
+            match trap {
+                Some(CpuTrap::Exception(CpuException::SvcInstruction)) => {
+                    crate::arch::irq::enable_local();
+                    break ReturnReason::UserSyscall;
+                }
+                Some(CpuTrap::Exception(exception)) => {
+                    crate::arch::irq::enable_local();
+                    self.exception = Some(exception);
+                    break ReturnReason::UserException;
+                }
+                Some(CpuTrap::Interrupt) => {
+                    let irq_chip = IRQ_CHIP.get().unwrap();
+                    while let Some(hw_irq_line) = irq_chip.claim_interrupt() {
+                        call_irq_callback_functions(
+                            &self.as_trap_frame(),
+                            &hw_irq_line,
+                            PrivilegeLevel::User,
+                        );
+                    }
+                    crate::arch::irq::enable_local();
+                }
+                _ => {
+                    panic!(
+                        "Cannot handle user trap: {:?}, trapframe: {:#?}",
+                        trap,
+                        self.as_trap_frame()
+                    )
+                }
+            }
+
+            if has_kernel_event() {
+                break ReturnReason::KernelEvent;
+            }
+        }
     }
 
     fn as_trap_frame(&self) -> TrapFrame {

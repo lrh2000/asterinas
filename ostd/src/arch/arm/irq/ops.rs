@@ -30,5 +30,5 @@ pub(crate) fn disable_local() {
 pub(crate) fn is_local_enabled() -> bool {
     let daif: usize;
     unsafe { asm!("mrs {}, daif", out(reg) daif) };
-    daif & 0b0010 == 0
+    daif & (1 << 7) == 0
 }
