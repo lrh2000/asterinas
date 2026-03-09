@@ -6,11 +6,7 @@ use core::{fmt::Debug, hint::spin_loop};
 use aster_network::{RxBuffer, TxBuffer};
 use aster_util::{field_ptr, slot_vec::SlotVec};
 use log::debug;
-use ostd::{
-    arch::trap::TrapFrame,
-    mm::{VmReader, VmWriter},
-    sync::SpinLock,
-};
+use ostd::{arch::trap::TrapFrame, mm::VmWriter, sync::SpinLock};
 use ostd_pod::Pod;
 
 use super::{
@@ -192,7 +188,7 @@ impl SocketDevice {
         debug!("buffer in send_packet_to_tx_queue: {:?}", buffer);
         let tx_buffer = {
             let tx_pool = TX_BUFFER_POOL.get().unwrap();
-            TxBuffer::new(header, &mut VmReader::from(buffer).to_fallible(), tx_pool).unwrap()
+            TxBuffer::new(header, buffer, tx_pool).unwrap()
         };
 
         let token = self.send_queue.add_dma_buf(&[&tx_buffer], &[])?;
