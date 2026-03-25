@@ -44,7 +44,7 @@ impl Drop for Listener {
 }
 
 pub(in crate::net::socket::vsock) struct ListenerInner {
-    pub(super) bound_port: BoundPort,
+    bound_port: BoundPort,
     pollee: Pollee,
     backlog: AtomicUsize,
     incoming_conns: SpinLock<Option<VecDeque<Arc<ConnectionInner>>>, BottomHalfDisabled>,
@@ -118,6 +118,10 @@ impl ListenerInner {
         } else {
             IoEvents::IN
         }
+    }
+
+    pub(super) fn bound_port(&self) -> &BoundPort {
+        &self.bound_port
     }
 
     pub(super) fn into_bound_port(self) -> BoundPort {
