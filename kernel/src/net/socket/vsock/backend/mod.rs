@@ -46,6 +46,14 @@ struct Component {
 
 static COMPONENT: Once<Component> = Once::new();
 
+fn process_rx_callback() {
+    vsock_space().process_rx(aster_virtio::device::vsock::DEVICE_NAME);
+}
+
+fn process_event_callback() {
+    vsock_space().process_event(aster_virtio::device::vsock::DEVICE_NAME);
+}
+
 pub(super) fn init() {
     COMPONENT.call_once(|| Component {
         next_timer_generation: AtomicU64::new(1),
@@ -58,12 +66,10 @@ pub(super) fn init() {
         return;
     }
 
-    aster_virtio::device::vsock::register_recv_callback(device_name, || {
-        vsock_space().process_rx(device_name);
-    });
-    aster_virtio::device::vsock::register_event_callback(device_name, || {
-        vsock_space().process_event(device_name);
-    });
+    if let Some(device) = aster_virtio::device::vsock::get_device(device_name) {
+        device.init_rx_callback(process_rx_callback);
+        device.init_event_callback(process_event_callback);
+    }
 }
 
 fn component() -> &'static Component {

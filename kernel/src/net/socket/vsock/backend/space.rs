@@ -3,6 +3,7 @@
 use core::mem;
 
 use aster_softirq::BottomHalfDisabled;
+use aster_virtio::device::vsock::header::{VirtioVsockHdr, VirtioVsockOp};
 use log::debug;
 use ostd::sync::SpinLock;
 use spin::Once;
@@ -174,7 +175,7 @@ impl VsockSpace {
 
         if let Err(error) = self.send_connection_control_packet(
             &inner,
-            aster_virtio::device::vsock::VirtioVsockOp::Request,
+            VirtioVsockOp::Request,
             0,
             PendingSendAction::ArmConnectTimeout,
         ) {
@@ -273,8 +274,7 @@ impl VsockSpace {
             };
             let header = {
                 let mut reader = buffer.buf();
-                let Ok(header) = reader.read_val::<aster_virtio::device::vsock::VirtioVsockHdr>()
-                else {
+                let Ok(header) = reader.read_val::<VirtioVsockHdr>() else {
                     continue;
                 };
                 header
@@ -311,7 +311,7 @@ impl VsockSpace {
 
     fn process_rx_packet(
         &self,
-        header: aster_virtio::device::vsock::VirtioVsockHdr,
+        header: VirtioVsockHdr,
         buffer: aster_virtio::device::vsock::RxBuffer,
     ) {
         if !self.validate_rx_header(&header, &buffer) {
@@ -325,29 +325,23 @@ impl VsockSpace {
         };
 
         match op {
-            aster_virtio::device::vsock::VirtioVsockOp::Request => self.process_request(header),
-            aster_virtio::device::vsock::VirtioVsockOp::Response => self.process_response(header),
-            aster_virtio::device::vsock::VirtioVsockOp::Rst => {
+            VirtioVsockOp::Request => self.process_request(header),
+            VirtioVsockOp::Response => self.process_response(header),
+            VirtioVsockOp::Rst => {
                 if let Some(connection) = self.remove_connection_for_rst(&header) {
                     self.reset_removed_connection(connection);
                 }
             }
-            aster_virtio::device::vsock::VirtioVsockOp::Shutdown => {
-                self.process_shutdown_packet(header)
-            }
-            aster_virtio::device::vsock::VirtioVsockOp::Rw => {
-                self.process_rw_packet(header, buffer)
-            }
-            aster_virtio::device::vsock::VirtioVsockOp::CreditUpdate => {
-                self.process_credit_update(header)
-            }
-            aster_virtio::device::vsock::VirtioVsockOp::CreditRequest => {
+            VirtioVsockOp::Shutdown => self.process_shutdown_packet(header),
+            VirtioVsockOp::Rw => self.process_rw_packet(header, buffer),
+            VirtioVsockOp::CreditUpdate => self.process_credit_update(header),
+            VirtioVsockOp::CreditRequest => {
                 self.process_credit_request(header);
             }
         }
     }
 
-    fn process_request(&self, header: aster_virtio::device::vsock::VirtioVsockHdr) {
+    fn process_request(&self, header: VirtioVsockHdr) {
         let dst_port = header.dst_port();
         let listener = {
             let sockets = self.sockets.lock();
@@ -380,7 +374,7 @@ impl VsockSpace {
 
         if let Err(error) = self.send_connection_control_packet(
             &connection,
-            aster_virtio::device::vsock::VirtioVsockOp::Response,
+            VirtioVsockOp::Response,
             0,
             PendingSendAction::MarkCreditReported,
         ) {
@@ -389,7 +383,7 @@ impl VsockSpace {
         }
     }
 
-    fn process_response(&self, header: aster_virtio::device::vsock::VirtioVsockHdr) {
+    fn process_response(&self, header: VirtioVsockHdr) {
         let conn_id = Self::conn_id_from_header(&header);
         let (credit_pollee, response_pollee) = {
             let sockets = self.sockets.lock();
@@ -409,7 +403,7 @@ impl VsockSpace {
         }
     }
 
-    fn process_shutdown_packet(&self, header: aster_virtio::device::vsock::VirtioVsockHdr) {
+    fn process_shutdown_packet(&self, header: VirtioVsockHdr) {
         let guest_cid = self.guest_cid();
         let conn_id = Self::conn_id_from_header(&header);
         let (credit_pollee, shutdown_pollee, notify_events, rst_header) = {
@@ -419,14 +413,9 @@ impl VsockSpace {
             };
             let credit_pollee = connection.on_credit_update(header.buf_alloc(), header.fwd_cnt());
             let shutdown_action = connection.on_shutdown(header.flags());
-            let rst_header = shutdown_action.send_rst.then(|| {
-                connection.make_header(
-                    guest_cid,
-                    aster_virtio::device::vsock::VirtioVsockOp::Rst,
-                    0,
-                    0,
-                )
-            });
+            let rst_header = shutdown_action
+                .send_rst
+                .then(|| connection.make_header(guest_cid, VirtioVsockOp::Rst, 0, 0));
 
             if shutdown_action.remove_lookup_key {
                 if !shutdown_action.send_rst {
@@ -461,7 +450,7 @@ impl VsockSpace {
 
     fn process_rw_packet(
         &self,
-        header: aster_virtio::device::vsock::VirtioVsockHdr,
+        header: VirtioVsockHdr,
         buffer: aster_virtio::device::vsock::RxBuffer,
     ) {
         let conn_id = Self::conn_id_from_header(&header);
@@ -498,7 +487,7 @@ impl VsockSpace {
         }
     }
 
-    fn process_credit_update(&self, header: aster_virtio::device::vsock::VirtioVsockHdr) {
+    fn process_credit_update(&self, header: VirtioVsockHdr) {
         let conn_id = Self::conn_id_from_header(&header);
         let credit_pollee = {
             let sockets = self.sockets.lock();
@@ -512,7 +501,7 @@ impl VsockSpace {
         }
     }
 
-    fn process_credit_request(&self, header: aster_virtio::device::vsock::VirtioVsockHdr) {
+    fn process_credit_request(&self, header: VirtioVsockHdr) {
         let guest_cid = self.guest_cid();
         let conn_id = Self::conn_id_from_header(&header);
         let (credit_pollee, response_header) = {
@@ -522,12 +511,7 @@ impl VsockSpace {
             };
             (
                 connection.on_credit_update(header.buf_alloc(), header.fwd_cnt()),
-                connection.make_header(
-                    guest_cid,
-                    aster_virtio::device::vsock::VirtioVsockOp::CreditUpdate,
-                    0,
-                    0,
-                ),
+                connection.make_header(guest_cid, VirtioVsockOp::CreditUpdate, 0, 0),
             )
         };
         if let Some(pollee) = credit_pollee {
@@ -548,10 +532,7 @@ impl VsockSpace {
         }
     }
 
-    fn remove_connection_for_rst(
-        &self,
-        header: &aster_virtio::device::vsock::VirtioVsockHdr,
-    ) -> Option<Arc<ConnectionInner>> {
+    fn remove_connection_for_rst(&self, header: &VirtioVsockHdr) -> Option<Arc<ConnectionInner>> {
         let conn_id = Self::conn_id_from_header(header);
         let mut sockets = self.sockets.lock();
         if let Some(connection) = sockets.connections.remove(&conn_id) {
@@ -577,7 +558,7 @@ impl VsockSpace {
     fn send_connection_control_packet(
         &self,
         connection: &Arc<ConnectionInner>,
-        op: aster_virtio::device::vsock::VirtioVsockOp,
+        op: VirtioVsockOp,
         flags: u32,
         pending_action: PendingSendAction,
     ) -> Result<()> {
@@ -596,14 +577,14 @@ impl VsockSpace {
         Ok(())
     }
 
-    fn send_raw_rst(&self, header: &aster_virtio::device::vsock::VirtioVsockHdr) {
-        let rst_header = aster_virtio::device::vsock::VirtioVsockHdr::new(
+    fn send_raw_rst(&self, header: &VirtioVsockHdr) {
+        let rst_header = VirtioVsockHdr::new(
             self.guest_cid() as u64,
             header.src_cid(),
             header.dst_port(),
             header.src_port(),
             0,
-            aster_virtio::device::vsock::VirtioVsockOp::Rst,
+            VirtioVsockOp::Rst,
             0,
             0,
             0,
@@ -641,14 +622,9 @@ impl VsockSpace {
             }
         };
         if let Some((connection, timeout_action)) = active_result {
-            let rst_header = timeout_action.send_rst.then(|| {
-                connection.make_header(
-                    guest_cid,
-                    aster_virtio::device::vsock::VirtioVsockOp::Rst,
-                    0,
-                    0,
-                )
-            });
+            let rst_header = timeout_action
+                .send_rst
+                .then(|| connection.make_header(guest_cid, VirtioVsockOp::Rst, 0, 0));
             drop(connection);
             if let Some(pollee) = timeout_action.notify_pollee {
                 pollee.notify(IoEvents::ERR | IoEvents::IN | IoEvents::OUT);
@@ -687,14 +663,9 @@ impl VsockSpace {
             triggered
         };
         if let Some((connection, timeout_action)) = closing_result {
-            let rst_header = timeout_action.send_rst.then(|| {
-                connection.make_header(
-                    guest_cid,
-                    aster_virtio::device::vsock::VirtioVsockOp::Rst,
-                    0,
-                    0,
-                )
-            });
+            let rst_header = timeout_action
+                .send_rst
+                .then(|| connection.make_header(guest_cid, VirtioVsockOp::Rst, 0, 0));
             drop(connection);
             if let Some(pollee) = timeout_action.notify_pollee {
                 pollee.notify(IoEvents::ERR | IoEvents::IN | IoEvents::OUT);
@@ -708,7 +679,7 @@ impl VsockSpace {
         false
     }
 
-    fn conn_id_from_header(header: &aster_virtio::device::vsock::VirtioVsockHdr) -> ConnId {
+    fn conn_id_from_header(header: &VirtioVsockHdr) -> ConnId {
         ConnId {
             local_port: header.dst_port(),
             peer_cid: header.src_cid() as u32,
@@ -718,7 +689,7 @@ impl VsockSpace {
 
     pub(super) fn send_packet(
         &self,
-        header: aster_virtio::device::vsock::VirtioVsockHdr,
+        header: VirtioVsockHdr,
         completion: Option<Box<dyn aster_virtio::device::vsock::TxCompletion>>,
     ) -> Result<aster_virtio::device::vsock::TxSubmit> {
         let builder = aster_virtio::device::vsock::new_tx_buffer_builder()?;
@@ -744,7 +715,7 @@ impl VsockSpace {
 
     fn validate_rx_header(
         &self,
-        header: &aster_virtio::device::vsock::VirtioVsockHdr,
+        header: &VirtioVsockHdr,
         buffer: &aster_virtio::device::vsock::RxBuffer,
     ) -> bool {
         if header.type_ != 1 {

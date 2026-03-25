@@ -6,8 +6,8 @@ use core::{
 };
 
 use aster_softirq::BottomHalfDisabled;
-use aster_virtio::device::vsock::{
-    TxCompletion, TxReservation, TxSubmit, VirtioVsockOp, VirtioVsockShutdownFlags,
+use aster_virtio::device::vsock::header::{
+    VirtioVsockHdr, VirtioVsockOp, VirtioVsockShutdownFlags,
 };
 use ostd::sync::SpinLock;
 use spin::once::Once;
@@ -671,7 +671,7 @@ impl ConnectionInner {
     pub(super) fn make_credit_update_header_if_needed(
         &self,
         guest_cid: u32,
-    ) -> Option<aster_virtio::device::vsock::VirtioVsockHdr> {
+    ) -> Option<VirtioVsockHdr> {
         let state = self.state.lock();
         let reported_delta = state
             .credit
@@ -697,7 +697,7 @@ impl ConnectionInner {
         op: VirtioVsockOp,
         len: u32,
         flags: u32,
-    ) -> aster_virtio::device::vsock::VirtioVsockHdr {
+    ) -> VirtioVsockHdr {
         let state = self.state.lock();
         Self::build_header_from_state(guest_cid, &state, self.conn_id, op, len, flags)
     }
@@ -709,9 +709,9 @@ impl ConnectionInner {
         op: VirtioVsockOp,
         len: u32,
         flags: u32,
-    ) -> aster_virtio::device::vsock::VirtioVsockHdr {
+    ) -> VirtioVsockHdr {
         let buf_alloc = state.rx_queue.max_bytes.min(u32::MAX as usize) as u32;
-        aster_virtio::device::vsock::VirtioVsockHdr::new(
+        VirtioVsockHdr::new(
             guest_cid as u64,
             state.remote_addr.cid as u64,
             conn_id.local_port,
@@ -737,7 +737,7 @@ impl ConnectionInner {
     pub(super) fn make_credit_request_header_if_needed(
         &self,
         guest_cid: u32,
-    ) -> Option<aster_virtio::device::vsock::VirtioVsockHdr> {
+    ) -> Option<VirtioVsockHdr> {
         let mut state = self.state.lock();
         let peer_available = state.credit.peer_buf_alloc.saturating_sub(
             state
@@ -1012,7 +1012,7 @@ impl Connection {
 
             builder.build(&self.inner.make_header(
                 guest_cid,
-                aster_virtio::device::vsock::VirtioVsockOp::Rw,
+                VirtioVsockOp::Rw,
                 payload_len as u32,
                 0,
             ))
