@@ -8,7 +8,7 @@ use crate::transport::{ConfigManager, VirtioTransport};
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod)]
-pub struct VirtioVsockConfig {
+pub(super) struct VirtioVsockConfig {
     guest_cid_low: u32,
     guest_cid_high: u32,
 }
@@ -23,7 +23,7 @@ impl VirtioVsockConfig {
         )
     }
 
-    pub(super) fn guest_cid(config_manager: &ConfigManager<Self>) -> u64 {
+    pub(super) fn read_guest_cid(config_manager: &ConfigManager<Self>) -> u64 {
         let guest_cid_low = config_manager
             .read_once::<u32>(offset_of!(Self, guest_cid_low))
             .unwrap_or(0);
