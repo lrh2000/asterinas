@@ -70,7 +70,7 @@ pub struct TxBufferBuilder<H> {
 }
 
 impl<H: Pod> TxBufferBuilder<H> {
-    pub fn append<F>(&mut self, f: F) -> Result<()>
+    pub fn append<F>(&mut self, f: F) -> Result<usize>
     where
         F: FnOnce(VmWriter<Infallible>) -> Result<usize>,
     {
@@ -81,7 +81,11 @@ impl<H: Pod> TxBufferBuilder<H> {
         self.nbytes += bytes_written;
         debug_assert!(self.nbytes < self.segment.size());
 
-        Ok(())
+        Ok(bytes_written)
+    }
+
+    pub fn nbytes(&self) -> usize {
+        self.nbytes
     }
 
     pub fn build(self, header: &H) -> TxBuffer {

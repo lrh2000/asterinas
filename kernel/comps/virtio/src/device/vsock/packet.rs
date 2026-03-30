@@ -7,7 +7,7 @@ use ostd::{
 };
 
 use crate::device::vsock::{
-    buffer::{RX_BUFFER_POOL, TX_BUFFER_POOL},
+    buffer::{RX_BUFFER_POOL, TX_BUFFER_LEN, TX_BUFFER_POOL},
     header::VirtioVsockHdr,
 };
 
@@ -30,11 +30,17 @@ impl TxPacket {
 pub struct TxPacketBuilder(TxBufferBuilder<VirtioVsockHdr>);
 
 impl TxPacketBuilder {
-    pub fn append<F>(&mut self, f: F) -> Result<()>
+    pub const MAX_NBYTES: usize = TX_BUFFER_LEN - size_of::<VirtioVsockHdr>();
+
+    pub fn append<F>(&mut self, f: F) -> Result<usize>
     where
         F: FnOnce(VmWriter<Infallible>) -> Result<usize>,
     {
         self.0.append(f)
+    }
+
+    pub fn nbytes(&self) -> usize {
+        self.0.nbytes()
     }
 
     pub fn build(self, header: &VirtioVsockHdr) -> TxPacket {

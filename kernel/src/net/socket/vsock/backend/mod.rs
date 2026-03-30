@@ -8,8 +8,8 @@ mod timer;
 
 use core::time::Duration;
 
-pub(super) use connection::{Connection, ConnectionInner};
-pub(super) use listener::{Listener, ListenerInner};
+pub(super) use connection::Connection;
+pub(super) use listener::Listener;
 pub(super) use port::BoundPort;
 
 // Reference: <https://elixir.bootlin.com/linux/v6.16.8/source/net/vmw_vsock/af_vsock.c#L136>

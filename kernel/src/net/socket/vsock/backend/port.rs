@@ -110,8 +110,8 @@ impl BoundPort {
 
     pub(in crate::net::socket::vsock) fn local_addr(&self) -> VsockSocketAddr {
         VsockSocketAddr {
-            cid: guest_cid,
-            port: self.vsock_space().guest_cid() as u32,
+            cid: self.vsock_space().guest_cid() as u32,
+            port: self.port,
         }
     }
 

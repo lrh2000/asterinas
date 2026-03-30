@@ -5,7 +5,7 @@ mod config;
 pub mod device;
 pub mod header;
 pub mod packet;
-mod queue;
+pub mod queue;
 
 use alloc::{
     collections::BTreeMap,

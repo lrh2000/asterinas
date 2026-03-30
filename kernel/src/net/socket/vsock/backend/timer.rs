@@ -7,7 +7,7 @@ use aster_softirq::{BottomHalfDisabled, Taskless};
 use ostd::sync::SpinLock;
 use spin::Once;
 
-use crate::net::socket::vsock::backend::{connection::ConnectionTimerEvent, vsock_space};
+use crate::net::socket::vsock::backend::{connection::ConnectionTimerEvent, space::vsock_space};
 
 static NEXT_GENERATION: AtomicU64 = AtomicU64::new(0);
 

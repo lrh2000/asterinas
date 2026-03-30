@@ -46,6 +46,10 @@ impl VsockSpace {
         }
     }
 
+    pub(super) fn device(&self) -> &VsockDevice {
+        &self.device
+    }
+
     pub(super) fn guest_cid(&self) -> u64 {
         self.device.guest_cid()
     }
