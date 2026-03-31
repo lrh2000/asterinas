@@ -71,7 +71,7 @@ impl TxQueue {
             });
         }
 
-        let token = self.queue.add_dma_buf(&[packet.inner()], &[]).unwrap() as usize;
+        let token = self.queue.add_dma_buf(&[packet.inner()], &[]).unwrap();
 
         debug_assert!(self.inflight[token as usize].is_none());
         self.inflight[token as usize] = Some(packet);
@@ -102,7 +102,7 @@ impl TxPendingGuard<'_> {
     pub fn push_pending(self, completion: Option<Box<dyn TxCompletion>>) {
         self.queue.pending.push_back(PendingTx {
             packet: self.packet,
-            completion: completion,
+            completion,
         });
     }
 }

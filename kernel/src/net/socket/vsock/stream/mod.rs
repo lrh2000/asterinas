@@ -41,11 +41,6 @@ enum State {
     Listen(ListenStream),
 }
 
-fn finish_failed_connect(mut init_stream: InitStream) -> (State, Result<()>) {
-    let result = init_stream.finish_last_connect();
-    (State::Init(init_stream), result)
-}
-
 impl VsockStreamSocket {
     pub fn new(is_nonblocking: bool) -> Result<Arc<Self>> {
         Ok(Arc::new(Self {

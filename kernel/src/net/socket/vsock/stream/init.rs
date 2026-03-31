@@ -5,7 +5,7 @@ use crate::{
     net::socket::{
         util::SocketAddr,
         vsock::{
-            addr::{UNSPECIFIED_VSOCK_ADDR, VMADDR_CID_ANY, VMADDR_CID_HOST, VsockSocketAddr},
+            addr::{UNSPECIFIED_VSOCK_ADDR, VMADDR_CID_HOST, VsockSocketAddr},
             backend::BoundPort,
             stream::{ConnectingStream, ListenStream},
         },

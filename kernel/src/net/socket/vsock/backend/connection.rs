@@ -21,7 +21,7 @@ use crate::{
         vsock::{
             addr::VsockSocketAddr,
             backend::{
-                BoundPort, CREDIT_UPDATE_THRESHOLD, DEFAULT_CLOSE_TIMEOUT,
+                BoundPort, CREDIT_UPDATE_THRESHOLD, DEFAULT_CLOSE_TIMEOUT, DEFAULT_CONNECT_TIMEOUT,
                 DEFAULT_PENDING_TX_BYTES, DEFAULT_RX_BUF_SIZE,
             },
         },
@@ -86,6 +86,7 @@ struct ShutdownState {
 
 struct TimerState {
     generation: u64,
+    #[expect(dead_code)]
     timer: Arc<Timer>,
 }
 
@@ -270,14 +271,10 @@ impl ConnectionState {
             }
         }
 
-        if let Some(read_offset) = read_offset {
-            Some(PoppedRxPackets {
-                packets: &mut packet_pool[0..num_packets],
-                read_offset,
-            })
-        } else {
-            None
-        }
+        read_offset.map(|read_offset| PoppedRxPackets {
+            packets: &mut packet_pool[0..num_packets],
+            read_offset,
+        })
     }
 
     fn ungrab_packets_and_finish_recv(
@@ -470,7 +467,7 @@ impl ConnectionState {
         let peer_free = self.peer_credit();
 
         if peer_free != 0 {
-            return Ok(peer_free as usize);
+            return Ok(peer_free);
         }
 
         if !self.credit.credit_request_pending {
@@ -635,7 +632,7 @@ impl ConnectionState {
         );
         self.credit.last_reported_fwd_cnt = self.credit.local_fwd_cnt;
 
-        conn.bound_port.vsock_space().send_packet(header);
+        conn.bound_port.vsock_space().send_packet(&header);
     }
 
     fn make_tx_packet(
@@ -715,6 +712,7 @@ impl ConnectionInner {
 
         let mut state = this.state.lock();
         state.send_packet(&this, VirtioVsockOp::Request, 0);
+        state.arm_timeout(&this, DEFAULT_CONNECT_TIMEOUT);
         drop(state);
 
         this

@@ -212,7 +212,7 @@ impl VsockSpace {
             return;
         };
 
-        let bound_port = BoundPort::new_shared(&listener.bound_port());
+        let bound_port = BoundPort::new_shared(listener.bound_port());
         let conn_id = vacant_conn.key();
 
         let inner = ConnectionInner::new_connected(bound_port, conn_id);
@@ -259,7 +259,7 @@ impl VsockSpace {
                 false
             }
             VirtioVsockOp::CreditRequest => {
-                connection.on_credit_update(header);
+                connection.on_credit_request(header);
                 false
             }
         };
@@ -343,7 +343,7 @@ impl VsockSpace {
             log::warn!("failed to allocate vsock packet: {:?}", header);
             return;
         };
-        let packet = builder.build(&header);
+        let packet = builder.build(header);
 
         let mut tx = self.device.lock_tx();
         match tx.try_send(packet) {
