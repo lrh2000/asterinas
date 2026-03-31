@@ -67,6 +67,10 @@ impl RxPacket {
         self.0.buf().read_val::<VirtioVsockHdr>().unwrap()
     }
 
+    pub fn payload_len(&self) -> usize {
+        self.0.packet_len()
+    }
+
     pub fn payload(&self) -> VmReader<'_, Infallible> {
         self.0.packet()
     }

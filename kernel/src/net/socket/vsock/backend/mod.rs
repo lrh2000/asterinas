@@ -8,7 +8,7 @@ mod timer;
 
 use core::time::Duration;
 
-pub(super) use connection::Connection;
+pub(super) use connection::{ConnectResult, Connection};
 pub(super) use listener::Listener;
 pub(super) use port::BoundPort;
 
@@ -40,7 +40,7 @@ fn process_rx_callback() {
 
 fn process_event_callback() {
     if let Ok(vsock_space) = space::vsock_space() {
-        vsock_space.process_event();
+        vsock_space.process_transport_event();
     }
 }
 

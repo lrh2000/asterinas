@@ -8,25 +8,27 @@ use core::{
 use aster_softirq::BottomHalfDisabled;
 use aster_virtio::device::vsock::{
     header::{VirtioVsockHdr, VirtioVsockOp, VirtioVsockShutdownFlags},
-    packet::{RxPacket, TxPacket, TxPacketBuilder}, queue::TxCompletion,
+    packet::{RxPacket, TxPacket, TxPacketBuilder},
+    queue::TxCompletion,
 };
 use ostd::sync::SpinLock;
-use spin::once::Once;
 use takeable::Takeable;
 
-use super::{
-    BoundPort, CREDIT_UPDATE_THRESHOLD, DEFAULT_CLOSE_TIMEOUT, DEFAULT_CONNECT_TIMEOUT,
-    DEFAULT_PENDING_TX_BYTES, DEFAULT_RX_BUF_SIZE,
-};
 use crate::{
     events::IoEvents,
     net::socket::{
         util::{SendRecvFlags, SockShutdownCmd},
-        vsock::addr::VsockSocketAddr,
+        vsock::{
+            addr::VsockSocketAddr,
+            backend::{
+                BoundPort, CREDIT_UPDATE_THRESHOLD, DEFAULT_CLOSE_TIMEOUT,
+                DEFAULT_PENDING_TX_BYTES, DEFAULT_RX_BUF_SIZE,
+            },
+        },
     },
     prelude::*,
     process::signal::Pollee,
-    time::{Timer, clocks::JIFFIES_TIMER_MANAGER, timer::Timeout},
+    time::Timer,
     util::{MultiRead, MultiWrite},
 };
 
@@ -37,7 +39,7 @@ pub(in crate::net::socket::vsock) struct Connection {
 pub(super) struct ConnectionInner {
     conn_id: ConnId,
     bound_port: BoundPort,
-    pollee: Once<Pollee>,
+    pollee: Pollee,
     state: SpinLock<ConnectionState, BottomHalfDisabled>,
     available_tx_bytes: AtomicUsize,
 }
@@ -53,11 +55,17 @@ struct ConnectionState {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Phase {
-    Init,
     Connecting,
+    ConnectFailed,
     Connected,
     Closing,
     Closed,
+}
+
+struct RxQueue {
+    packets: VecDeque<RxPacket>,
+    used_bytes: usize,
+    read_offset: usize,
 }
 
 struct CreditState {
@@ -88,10 +96,6 @@ impl Connection {
         }
     }
 
-    pub(super) fn init_pollee(&self, pollee: Pollee) {
-        self.inner.pollee.call_once(move || pollee);
-    }
-
     pub(in crate::net::socket::vsock) fn local_addr(&self) -> VsockSocketAddr {
         VsockSocketAddr {
             cid: self.inner.conn_id.local_cid as u32,
@@ -117,7 +121,7 @@ impl Connection {
     pub(in crate::net::socket::vsock) fn has_connect_result(&self) -> bool {
         let state = self.inner.state.lock();
         match state.phase {
-            Phase::Init => Arc::strong_count(&self.inner) == 1,
+            Phase::ConnectFailed => Arc::strong_count(&self.inner) == 1,
             Phase::Connecting => false,
             Phase::Connected | Phase::Closing | Phase::Closed => true,
         }
@@ -126,17 +130,15 @@ impl Connection {
     pub(in crate::net::socket::vsock) fn finish_connect(mut self) -> ConnectResult {
         let mut state = self.inner.state.lock();
         match state.phase {
-            Phase::Init if Arc::strong_count(&self.inner) == 1 => {
+            Phase::ConnectFailed if Arc::strong_count(&self.inner) == 1 => {
                 let error = state.error.take();
                 drop(state);
                 ConnectResult::Failed(
-                    Arc::into_inner(self.inner.take())
-                        .unwrap()
-                        .into_bound_port(),
+                    Arc::into_inner(self.inner.take()).unwrap().bound_port,
                     error.unwrap(),
                 )
             }
-            Phase::Init | Phase::Connecting => {
+            Phase::ConnectFailed | Phase::Connecting => {
                 drop(state);
                 ConnectResult::Connecting(self)
             }
@@ -172,6 +174,8 @@ impl Connection {
             .state
             .lock()
             .ungrab_packets_and_finish_recv(&self.inner, packets, recv_len);
+
+        self.inner.pollee.invalidate();
 
         result
     }
@@ -258,7 +262,7 @@ impl ConnectionState {
                 self.rx_queue.read_offset = 0;
             }
 
-            let payload_len = packet_ref.payload().remain();
+            let payload_len = packet_ref.payload_len();
             if payload_len >= max_bytes {
                 break;
             } else {
@@ -285,7 +289,7 @@ impl ConnectionState {
         self.undo_pop_rx_packets(packets);
 
         self.rx_queue.used_bytes -= recv_len;
-        self.credit.local_fwd_cnt += recv_len as u32;
+        self.credit.local_fwd_cnt = self.credit.local_fwd_cnt.wrapping_add(recv_len as u32);
 
         self.send_credit_update_header_if_needed(conn);
     }
@@ -297,7 +301,7 @@ impl ConnectionState {
             return;
         }
 
-        debug_assert!(packets.read_offset < packets.packets[0].as_ref().unwrap().payload().remain());
+        debug_assert!(packets.read_offset < packets.packets[0].as_ref().unwrap().payload_len());
 
         for packet_opt in packets.packets.iter_mut().rev() {
             self.rx_queue.packets.push_front(packet_opt.take().unwrap());
@@ -306,7 +310,11 @@ impl ConnectionState {
     }
 
     fn send_credit_update_header_if_needed(&mut self, conn: &ConnectionInner) {
-        if self.credit.local_fwd_cnt - self.credit.last_reported_fwd_cnt < CREDIT_UPDATE_THRESHOLD {
+        let new_credit = self
+            .credit
+            .local_fwd_cnt
+            .wrapping_sub(self.credit.last_reported_fwd_cnt);
+        if new_credit < CREDIT_UPDATE_THRESHOLD {
             return;
         }
 
@@ -338,6 +346,8 @@ impl Connection {
 
         self.build_and_send_tx_packets(&mut packet_pool[..])?;
 
+        self.inner.pollee.invalidate();
+
         Ok(num_bytes)
     }
 
@@ -362,7 +372,7 @@ impl Connection {
             return_errno_with_message!(Errno::EAGAIN, "the pending queue is full");
         }
 
-        let credit_bytes = state.check_tx_credit(&self.inner)?;
+        let credit_bytes = state.check_peer_credit(&self.inner)?;
         debug_assert_ne!(credit_bytes, 0);
 
         let num_bytes = max_bytes.min(buffer_bytes).min(credit_bytes);
@@ -443,19 +453,21 @@ impl Connection {
             num_bytes += nbytes;
         }
 
-        let buffer_bytes = self.inner.available_tx_bytes.fetch_sub(num_bytes, Ordering::Relaxed);
+        let buffer_bytes = self
+            .inner
+            .available_tx_bytes
+            .fetch_sub(num_bytes, Ordering::Relaxed);
         debug_assert!(buffer_bytes >= num_bytes);
 
-        state.consume_tx_credit(num_bytes);
+        state.consume_peer_credit(num_bytes);
 
         Ok(())
     }
 }
 
 impl ConnectionState {
-    fn check_tx_credit(&mut self, conn: &ConnectionInner) -> Result<usize> {
-        let peer_free =
-            self.credit.peer_buf_alloc - (self.credit.tx_cnt - self.credit.peer_fwd_cnt);
+    fn check_peer_credit(&mut self, conn: &ConnectionInner) -> Result<usize> {
+        let peer_free = self.peer_credit();
 
         if peer_free != 0 {
             return Ok(peer_free as usize);
@@ -469,8 +481,14 @@ impl ConnectionState {
         return_errno_with_message!(Errno::EAGAIN, "the peer has no receive credit");
     }
 
-    fn consume_tx_credit(&mut self, num_bytes: usize) {
-        self.credit.tx_cnt += num_bytes as u32;
+    fn peer_credit(&self) -> usize {
+        let alloc = self.credit.peer_buf_alloc;
+        let used = self.credit.tx_cnt.wrapping_sub(self.credit.peer_fwd_cnt);
+        alloc.saturating_sub(used) as usize
+    }
+
+    fn consume_peer_credit(&mut self, num_bytes: usize) {
+        self.credit.tx_cnt = self.credit.tx_cnt.wrapping_add(num_bytes as u32);
     }
 }
 
@@ -483,67 +501,17 @@ impl TxCompletion for ReleasePendingBytes {}
 
 impl Drop for ReleasePendingBytes {
     fn drop(&mut self) {
-        self.connection.available_tx_bytes.fetch_add(self.bytes, Ordering::Relaxed);
-        self.connection.notify_pollee(IoEvents::OUT);
+        self.connection
+            .available_tx_bytes
+            .fetch_add(self.bytes, Ordering::Relaxed);
+        self.connection.pollee.notify(IoEvents::OUT);
     }
 }
 
 impl Connection {
     pub(in crate::net::socket::vsock) fn shutdown(&mut self, cmd: SockShutdownCmd) -> Result<()> {
-        let shutdown_action = self.inner.prepare_local_shutdown(cmd);
-        if shutdown_action.shutdown_flags.is_empty() {
-            return Ok(());
-        }
-
-        let header = self.inner.make_header(
-            super::space::vsock_space().guest_cid(),
-            VirtioVsockOp::Shutdown,
-            0,
-            shutdown_action.shutdown_flags.bits(),
-        );
-        let completion_action = if shutdown_action.arm_close_timeout {
-            PendingSendAction::ArmCloseTimeout
-        } else {
-            PendingSendAction::MarkCreditReported
-        };
-        let completion = Box::new(DeferredConnectionSend::new(
-            self.inner.conn_id(),
-            completion_action,
-        ));
-        if matches!(
-            super::space::vsock_space().send_packet(header, Some(completion))?,
-            TxSubmit::SubmittedToQueue
-        ) {
-            self.inner.mark_credit_reported();
-            if shutdown_action.arm_close_timeout {
-                self.inner.arm_close_timeout();
-            }
-        }
-        if shutdown_action.send_rst {
-            super::space::vsock_space().remove_connection_instance(&self.inner);
-            let rst_header = self.inner.make_header(
-                super::space::vsock_space().guest_cid(),
-                VirtioVsockOp::Rst,
-                0,
-                0,
-            );
-            let completion = Box::new(DeferredConnectionSend::new(
-                self.inner.conn_id(),
-                PendingSendAction::MarkCreditReported,
-            ));
-            if matches!(
-                super::space::vsock_space().send_packet(rst_header, Some(completion)),
-                Ok(TxSubmit::SubmittedToQueue)
-            ) {
-                self.inner.mark_credit_reported();
-            }
-        }
-        self.inner.notify_pollee(shutdown_action.notify_events);
+        self.shutdown_or_drop_common(cmd, false);
         Ok(())
-    }
-
-    pub(in crate::net::socket::vsock) fn check_io_events(&self) -> IoEvents {
-        self.inner.check_io_events()
     }
 }
 
@@ -553,59 +521,94 @@ impl Drop for Connection {
             return;
         }
 
-        let inner = self.inner.take();
-        let drop_action = inner.prepare_drop();
-        let guest_cid = super::space::vsock_space().guest_cid();
+        self.shutdown_or_drop_common(SockShutdownCmd::SHUT_RDWR, true);
+    }
+}
 
-        match drop_action.table_action {
-            DropTableAction::Keep => {}
-            DropTableAction::MoveToClosing => {
-                super::space::vsock_space().move_connection_to_closing(inner.conn_id());
+impl Connection {
+    fn shutdown_or_drop_common(&self, cmd: SockShutdownCmd, on_drop: bool) {
+        let mut state = self.inner.state.lock();
+
+        let mut notify_events = IoEvents::empty();
+        let mut shutdown_flags = VirtioVsockShutdownFlags::empty();
+
+        if cmd.shut_read() && !state.shutdown.local_read_closed {
+            state.shutdown.local_read_closed = true;
+            shutdown_flags |= VirtioVsockShutdownFlags::RECEIVE;
+            notify_events |= IoEvents::IN | IoEvents::RDHUP | IoEvents::HUP;
+        }
+
+        if cmd.shut_write() && !state.shutdown.local_write_closed {
+            state.shutdown.local_write_closed = true;
+            shutdown_flags |= VirtioVsockShutdownFlags::SEND;
+            notify_events |= IoEvents::OUT | IoEvents::HUP;
+        }
+
+        if shutdown_flags.is_empty() {
+            return;
+        }
+
+        let local_fully_closed =
+            state.shutdown.local_read_closed && state.shutdown.local_write_closed;
+        let peer_fully_closed = state.shutdown.peer_read_closed && state.shutdown.peer_write_closed;
+
+        if !local_fully_closed || !peer_fully_closed {
+            state.send_packet(&self.inner, VirtioVsockOp::Shutdown, shutdown_flags.bits());
+
+            if on_drop {
+                debug_assert!(local_fully_closed);
+                state.phase = Phase::Closing;
+                state.arm_timeout(&self.inner, DEFAULT_CLOSE_TIMEOUT);
             }
-            DropTableAction::Remove => {
-                super::space::vsock_space().remove_connection_instance(&inner);
+
+            drop(state);
+        } else {
+            state.phase = Phase::Closed;
+            state.send_packet(&self.inner, VirtioVsockOp::Rst, 0);
+            drop(state);
+
+            let vsock_space = self.inner.bound_port.vsock_space();
+            vsock_space.remove_connection(&self.inner);
+        }
+
+        self.inner.pollee.notify(notify_events);
+    }
+}
+
+impl Connection {
+    pub(in crate::net::socket::vsock) fn check_io_events(&self) -> IoEvents {
+        let state = self.inner.state.lock();
+        let mut events = IoEvents::empty();
+
+        if !state.rx_queue.packets.is_empty() {
+            events |= IoEvents::IN;
+        }
+        if state.phase == Phase::Connected
+            && state.peer_credit() != 0
+            && self.inner.available_tx_bytes.load(Ordering::Relaxed) != 0
+        {
+            events |= IoEvents::OUT;
+        }
+
+        if state.error.is_some() {
+            events |= IoEvents::ERR;
+        }
+
+        if state.shutdown.peer_read_closed || state.shutdown.local_write_closed {
+            events |= IoEvents::OUT;
+        }
+        if state.shutdown.peer_write_closed || state.shutdown.local_read_closed {
+            events |= IoEvents::RDHUP | IoEvents::IN;
+            if state.shutdown.peer_read_closed || state.shutdown.local_write_closed {
+                events |= IoEvents::HUP;
             }
         }
 
-        if !drop_action.shutdown_flags.is_empty() {
-            let shutdown_header = inner.make_header(
-                guest_cid,
-                VirtioVsockOp::Shutdown,
-                0,
-                drop_action.shutdown_flags.bits(),
-            );
-            let completion_action = if drop_action.arm_close_timeout {
-                PendingSendAction::ArmCloseTimeout
-            } else {
-                PendingSendAction::MarkCreditReported
-            };
-            let completion = Box::new(DeferredConnectionSend::new(
-                inner.conn_id(),
-                completion_action,
-            ));
-            if matches!(
-                super::space::vsock_space().send_packet(shutdown_header, Some(completion)),
-                Ok(TxSubmit::SubmittedToQueue)
-            ) {
-                inner.mark_credit_reported();
-                if drop_action.arm_close_timeout {
-                    inner.arm_close_timeout();
-                }
-            }
-        }
-        if drop_action.send_rst {
-            let rst_header = inner.make_header(guest_cid, VirtioVsockOp::Rst, 0, 0);
-            let completion = Box::new(DeferredConnectionSend::new(
-                inner.conn_id(),
-                PendingSendAction::MarkCreditReported,
-            ));
-            if matches!(
-                super::space::vsock_space().send_packet(rst_header, Some(completion)),
-                Ok(TxSubmit::SubmittedToQueue)
-            ) {
-                inner.mark_credit_reported();
-            }
-        }
+        events
+    }
+
+    pub(in crate::net::socket::vsock) fn pollee(&self) -> &Pollee {
+        &self.inner.pollee
     }
 }
 
@@ -655,49 +658,23 @@ impl ConnectionState {
 
         packet_builder.build(&header)
     }
-}
 
-pub(super) struct ConnectionTimerEvent {
-    pub(super) conn_id: ConnId,
-    pub(super) generation: u64,
-}
+    fn arm_timeout(&mut self, conn: &ConnectionInner, duration: Duration) {
+        use super::timer::{next_timer_generation, push_timer_event};
+        use crate::time::{clocks::JIFFIES_TIMER_MANAGER, timer::Timeout};
 
-pub(super) struct ShutdownAction {
-    pub(super) remove_lookup_key: bool,
-    pub(super) send_rst: bool,
-    pub(super) notify_pollee: Option<Pollee>,
-    pub(super) notify_events: IoEvents,
-}
+        let timer_manager = JIFFIES_TIMER_MANAGER.get().unwrap();
 
-struct LocalShutdownAction {
-    shutdown_flags: VirtioVsockShutdownFlags,
-    notify_events: IoEvents,
-    send_rst: bool,
-    arm_close_timeout: bool,
-}
+        let conn_id = conn.conn_id;
+        let generation = next_timer_generation();
 
-pub(super) struct TimeoutAction {
-    pub(super) notify_pollee: Option<Pollee>,
-    pub(super) send_rst: bool,
-}
+        let timer = timer_manager.create_timer(move |_guard| {
+            push_timer_event(conn_id, generation);
+        });
+        timer.lock().set_timeout(Timeout::After(duration));
 
-enum DropTableAction {
-    Keep,
-    MoveToClosing,
-    Remove,
-}
-
-struct DropAction {
-    table_action: DropTableAction,
-    shutdown_flags: VirtioVsockShutdownFlags,
-    send_rst: bool,
-    arm_close_timeout: bool,
-}
-
-struct RxQueue {
-    packets: VecDeque<RxPacket>,
-    used_bytes: usize,
-    read_offset: usize,
+        self.timer = Some(TimerState { generation, timer });
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -708,49 +685,84 @@ pub(super) struct ConnId {
     pub(super) peer_port: u32,
 }
 
+impl ConnId {
+    pub(super) fn from_port_and_remote(port: &BoundPort, remote: VsockSocketAddr) -> Self {
+        Self {
+            local_cid: port.vsock_space().guest_cid(),
+            peer_cid: remote.cid as u64,
+            local_port: port.port(),
+            peer_port: remote.port,
+        }
+    }
+
+    pub(super) fn from_incoming_header(header: &VirtioVsockHdr) -> Self {
+        Self {
+            local_cid: header.dst_cid(),
+            peer_cid: header.src_cid(),
+            local_port: header.dst_port(),
+            peer_port: header.src_port(),
+        }
+    }
+}
+
 impl ConnectionInner {
-    pub(super) fn new_connecting(bound_port: BoundPort, remote_addr: VsockSocketAddr) -> Arc<Self> {
-        Self::new(bound_port, remote_addr, Phase::Connecting)
+    pub(super) fn new_connecting(
+        bound_port: BoundPort,
+        conn_id: &ConnId,
+        pollee: Pollee,
+    ) -> Arc<Self> {
+        let this = Self::new(bound_port, conn_id, pollee, Phase::Connecting);
+
+        let mut state = this.state.lock();
+        state.send_packet(&this, VirtioVsockOp::Request, 0);
+        drop(state);
+
+        this
     }
 
-    pub(super) fn new_connected(bound_port: BoundPort, remote_addr: VsockSocketAddr) -> Arc<Self> {
-        Self::new(bound_port, remote_addr, Phase::Connected)
+    pub(super) fn new_connected(bound_port: BoundPort, conn_id: &ConnId) -> Arc<Self> {
+        let this = Self::new(bound_port, conn_id, Pollee::new(), Phase::Connected);
+
+        let mut state = this.state.lock();
+        state.send_packet(&this, VirtioVsockOp::Response, 0);
+        drop(state);
+
+        this
     }
 
-    fn new(bound_port: BoundPort, remote_addr: VsockSocketAddr, phase: Phase) -> Arc<Self> {
-        Arc::new(Self {
-            conn_id: ConnId {
-                local_cid: bound_port.vsock_space().guest_cid(),
-                peer_cid: remote_addr.cid as u64,
-                local_port: bound_port.port(),
-                peer_port: remote_addr.port,
+    fn new(bound_port: BoundPort, conn_id: &ConnId, pollee: Pollee, phase: Phase) -> Arc<Self> {
+        debug_assert_eq!(bound_port.port(), conn_id.local_port);
+
+        let state = ConnectionState {
+            phase,
+            error: None,
+            rx_queue: RxQueue {
+                packets: VecDeque::new(),
+                used_bytes: 0,
+                read_offset: 0,
             },
+            credit: CreditState {
+                peer_buf_alloc: 0,
+                peer_fwd_cnt: 0,
+                local_fwd_cnt: 0,
+                last_reported_fwd_cnt: 0,
+                credit_request_pending: false,
+                tx_cnt: 0,
+            },
+            shutdown: ShutdownState {
+                local_read_closed: false,
+                local_write_closed: false,
+                peer_read_closed: false,
+                peer_write_closed: false,
+            },
+            timer: None,
+        };
+
+        Arc::new(Self {
+            conn_id: *conn_id,
             bound_port,
-            pollee: Once::new(),
-            state: SpinLock::new(ConnectionState {
-                phase,
-                error: None,
-                rx_queue: RxQueue {
-                    packets: VecDeque::new(),
-                    used_bytes: 0,
-                    read_offset: 0,
-                },
-                credit: CreditState {
-                    peer_buf_alloc: 0,
-                    peer_fwd_cnt: 0,
-                    local_fwd_cnt: 0,
-                    last_reported_fwd_cnt: 0,
-                    credit_request_pending: false,
-                    tx_cnt: 0,
-                },
-                shutdown: ShutdownState {
-                    local_read_closed: false,
-                    local_write_closed: false,
-                    peer_read_closed: false,
-                    peer_write_closed: false,
-                },
-                timer: None,
-            }),
+            pollee,
+            state: SpinLock::new(state),
             available_tx_bytes: AtomicUsize::new(DEFAULT_PENDING_TX_BYTES),
         })
     }
@@ -759,286 +771,203 @@ impl ConnectionInner {
         self.conn_id
     }
 
-    pub(super) fn into_bound_port(self) -> BoundPort {
-        self.bound_port
+    pub(super) fn pollee(&self) -> &Pollee {
+        &self.pollee
     }
 
-    pub(super) fn on_response(&self) -> Option<Pollee> {
-        self.cancel_timer();
-        self.state.lock().phase = Phase::Connected;
-        self.pollee.get().cloned()
-    }
-
-    pub(super) fn on_rst(&self) -> Option<Pollee> {
-        self.cancel_timer();
+    pub(super) fn on_response(&self, header: &VirtioVsockHdr) -> Result<()> {
         let mut state = self.state.lock();
-        state.phase = Phase::Closed;
-        state.error = Some(Error::with_message(
-            Errno::ECONNRESET,
-            "the connection is reset",
-        ));
-        self.pollee.get().cloned()
-    }
 
-    pub(super) fn arm_connect_timeout(&self) {
-        self.arm_timeout(DEFAULT_CONNECT_TIMEOUT);
-    }
-
-    pub(super) fn arm_close_timeout(&self) {
-        self.arm_timeout(DEFAULT_CLOSE_TIMEOUT);
-    }
-
-    fn arm_timeout(&self, duration: Duration) {
-        let generation = super::next_timer_generation();
-        let conn_id = self.conn_id;
-        let timer_manager = JIFFIES_TIMER_MANAGER
-            .get()
-            .expect("jiffies timer manager should be initialized");
-        let timer = timer_manager.create_timer(move |_guard| {
-            super::push_timer_event(ConnectionTimerEvent {
-                conn_id,
-                generation,
-            });
-        });
-        timer.lock().set_timeout(Timeout::After(duration));
-
-        let mut timer_state = self.timer.lock();
-        if let Some(old_timer) = timer_state.replace(ConnectionTimerState { generation, timer }) {
-            old_timer.timer.lock().cancel();
+        if state.phase != Phase::Connecting {
+            state.active_rst(self);
+            return_errno_with_message!(Errno::EISCONN, "the connection is established");
         }
+
+        state.update_peer_credit(self, header);
+
+        state.phase = Phase::Connected;
+        state.timer = None;
+
+        state.send_packet(self, VirtioVsockOp::Response, 0);
+
+        drop(state);
+        self.pollee.notify(IoEvents::OUT);
+
+        Ok(())
     }
 
-    pub(super) fn on_timeout(&self, generation: u64) -> Option<TimeoutAction> {
-        let timer = {
-            let mut timer_state = self.timer.lock();
-            let active_timer = timer_state.take()?;
-            if active_timer.generation != generation {
-                *timer_state = Some(active_timer);
-                return None;
-            }
-            active_timer.timer
-        };
-        timer.lock().cancel();
-
+    pub(super) fn on_rst(&self) {
         let mut state = self.state.lock();
-        if matches!(state.phase, Phase::Connecting) {
-            state.phase = Phase::Closed;
-            state.error = Some(Error::with_message(
-                Errno::ETIMEDOUT,
-                "the connection timed out",
-            ));
-            self.is_connect_result_ready.store(true, Ordering::Release);
-            return Some(TimeoutAction {
-                notify_pollee: self.pollee.get().cloned(),
-                send_rst: false,
-            });
-        }
 
-        if matches!(state.phase, Phase::Closing) {
-            state.phase = Phase::Closed;
-            return Some(TimeoutAction {
-                notify_pollee: self.pollee.get().cloned(),
-                send_rst: true,
-            });
-        }
+        state.do_rst();
 
-        None
+        // The caller will notify the pollee _after_ removing the connection from the table.
     }
 
-    pub(super) fn on_shutdown(&self, flags: u32) -> ShutdownAction {
+    pub(super) fn on_shutdown(&self, header: &VirtioVsockHdr) -> bool {
         let mut state = self.state.lock();
         let mut notify_events = IoEvents::empty();
-        if flags & VirtioVsockShutdownFlags::SEND.bits() != 0 {
+
+        let flags = VirtioVsockShutdownFlags::from_bits_truncate(header.flags());
+        if flags.contains(VirtioVsockShutdownFlags::SEND) && !state.shutdown.peer_write_closed {
             state.shutdown.peer_write_closed = true;
-            notify_events |= IoEvents::IN | IoEvents::RDHUP;
+            notify_events |= IoEvents::IN | IoEvents::RDHUP | IoEvents::HUP;
         }
-        if flags & VirtioVsockShutdownFlags::RECEIVE.bits() != 0 {
+        if flags.contains(VirtioVsockShutdownFlags::RECEIVE) && !state.shutdown.peer_read_closed {
             state.shutdown.peer_read_closed = true;
             notify_events |= IoEvents::OUT | IoEvents::HUP;
         }
 
-        let peer_fully_closed = state.shutdown.peer_read_closed && state.shutdown.peer_write_closed;
-        let local_fully_closed =
-            state.shutdown.local_read_closed && state.shutdown.local_write_closed;
-        let should_send_rst = peer_fully_closed
-            && local_fully_closed
-            && state.rx_queue.packets.is_empty()
-            && state.rx_queue.read_offset == 0;
-        if peer_fully_closed {
-            state.phase = if should_send_rst {
-                Phase::Closed
-            } else {
-                Phase::Closing
-            };
+        if notify_events.is_empty() {
+            return false;
         }
 
-        ShutdownAction {
-            remove_lookup_key: peer_fully_closed,
-            send_rst: should_send_rst,
-            notify_pollee: self.pollee.get().cloned(),
-            notify_events,
-        }
+        let peer_fully_closed = state.shutdown.peer_read_closed && state.shutdown.peer_write_closed;
+        let should_remove = if peer_fully_closed && state.phase == Phase::Closing {
+            state.phase = Phase::Closed;
+            state.send_packet(self, VirtioVsockOp::Rst, 0);
+            true
+        } else {
+            false
+        };
+
+        drop(state);
+        self.pollee.notify(notify_events);
+
+        should_remove
     }
 
-    pub(super) fn on_credit_update(&self, buf_alloc: u32, fwd_cnt: u32) -> Option<Pollee> {
+    pub(super) fn on_rw(&self, header: &VirtioVsockHdr, packet: RxPacket) -> Result<()> {
         let mut state = self.state.lock();
-        state.credit.peer_buf_alloc = buf_alloc;
-        state.credit.peer_fwd_cnt = fwd_cnt;
+
+        let len = packet.payload_len();
+        if state.rx_queue.used_bytes + len - state.rx_queue.read_offset > DEFAULT_RX_BUF_SIZE {
+            state.active_rst(self);
+            return_errno_with_message!(Errno::ENOMEM, "the receive queue is full");
+        }
+
+        state.update_peer_credit(self, header);
+
+        state.rx_queue.used_bytes += len;
+        state.rx_queue.packets.push_back(packet);
+
+        drop(state);
+        self.pollee.notify(IoEvents::IN);
+
+        Ok(())
+    }
+
+    pub(super) fn on_credit_update(&self, header: &VirtioVsockHdr) {
+        let mut state = self.state.lock();
+
+        state.update_peer_credit(self, header);
+
         state.credit.credit_request_pending = false;
-        self.pollee.get().cloned()
     }
 
-    pub(super) fn enqueue_rx_buffer(
-        &self,
-        buffer: aster_virtio::device::vsock::RxBuffer,
-    ) -> Result<Option<Pollee>> {
+    pub(super) fn on_credit_request(&self, header: &VirtioVsockHdr) {
         let mut state = self.state.lock();
-        let packet_len = buffer.packet_len();
-        let Some(new_used_bytes) = state.rx_queue.used_bytes.checked_add(packet_len) else {
-            return_errno_with_message!(Errno::ENOMEM, "the receive queue is full");
+
+        state.update_peer_credit(self, header);
+
+        state.send_packet(self, VirtioVsockOp::CreditUpdate, 0);
+    }
+
+    pub(super) fn on_timeout(&self, generation: u64) -> bool {
+        let mut state = self.state.lock();
+
+        let Some(timer) = state.timer.as_ref() else {
+            return false;
         };
-        if new_used_bytes > DEFAULT_RX_BUF_SIZE {
-            return_errno_with_message!(Errno::ENOMEM, "the receive queue is full");
+        if timer.generation != generation {
+            return false;
         }
 
-        state.rx_queue.used_bytes = new_used_bytes;
-        state.rx_queue.packets.push_back(buffer);
-        Ok(self.pollee.get().cloned())
+        state.timer = None;
+
+        // If this method returns true, the caller will notify the pollee _after_ removing the
+        // connection from the table.
+
+        if state.phase == Phase::Connecting {
+            state.phase = Phase::ConnectFailed;
+            state.error = Some(Error::with_message(
+                Errno::ETIMEDOUT,
+                "the connection timed out",
+            ));
+            return true;
+        }
+
+        if state.phase == Phase::Closing {
+            state.phase = Phase::Closed;
+            return true;
+        }
+
+        false
     }
 
-    pub(super) fn check_io_events(&self) -> IoEvents {
-        let state = self.state.lock();
-        let mut events = IoEvents::empty();
-        let peer_available = state.credit.peer_buf_alloc.saturating_sub(
-            state
-                .credit
-                .tx_cnt
-                .saturating_sub(state.credit.peer_fwd_cnt),
-        );
-
-        if !state.rx_queue.packets.is_empty()
-            || state.shutdown.peer_write_closed
-            || state.shutdown.local_read_closed
-        {
-            events |= IoEvents::IN;
-        }
-        if state.shutdown.local_write_closed
-            || state.shutdown.peer_read_closed
-            || (matches!(state.phase, Phase::Connected)
-                && peer_available != 0
-                && self.available_tx_bytes.load(Ordering::Relaxed) > 0)
-        {
-            events |= IoEvents::OUT;
-        }
-        if state.error.is_some() {
-            events |= IoEvents::ERR;
-        }
-        if state.shutdown.peer_write_closed {
-            events |= IoEvents::RDHUP;
-        }
-        if matches!(state.phase, Phase::Closed | Phase::Closed) {
-            events |= IoEvents::HUP;
-        }
-
-        events
-    }
-
-    fn notify_pollee(&self, events: IoEvents) {
-        let Some(pollee) = self.pollee.get() else {
-            return;
-        };
-        pollee.notify(events);
-    }
-
-    fn cancel_timer(&self) {
-        let timer = self
-            .timer
-            .lock()
-            .take()
-            .map(|timer_state| timer_state.timer);
-        if let Some(timer) = timer {
-            timer.lock().cancel();
-        }
-    }
-
-    fn prepare_local_shutdown(&self, cmd: SockShutdownCmd) -> LocalShutdownAction {
-        let mut notify_events = IoEvents::empty();
-        let mut shutdown_flags = VirtioVsockShutdownFlags::empty();
+    pub(super) fn active_rst(&self) {
         let mut state = self.state.lock();
 
-        if cmd.shut_read() && !state.shutdown.local_read_closed {
-            state.shutdown.local_read_closed = true;
-            shutdown_flags |= VirtioVsockShutdownFlags::RECEIVE;
-            notify_events |= IoEvents::IN | IoEvents::RDHUP;
+        state.active_rst(self);
+    }
+}
+
+impl ConnectionState {
+    fn active_rst(&mut self, conn: &ConnectionInner) {
+        if self.do_rst() {
+            self.send_packet(conn, VirtioVsockOp::Rst, 0);
         }
 
-        if cmd.shut_write() && !state.shutdown.local_write_closed {
-            state.shutdown.local_write_closed = true;
-            shutdown_flags |= VirtioVsockShutdownFlags::SEND;
-            notify_events |= IoEvents::OUT | IoEvents::HUP;
-        }
-
-        let local_fully_closed =
-            state.shutdown.local_read_closed && state.shutdown.local_write_closed;
-        let peer_fully_closed = state.shutdown.peer_read_closed && state.shutdown.peer_write_closed;
-        let rx_queue_empty = state.rx_queue.packets.is_empty() && state.rx_queue.read_offset == 0;
-        let send_rst = local_fully_closed && peer_fully_closed && rx_queue_empty;
-
-        if local_fully_closed {
-            state.phase = if send_rst {
-                Phase::Closed
-            } else {
-                Phase::Closing
-            };
-        }
-
-        LocalShutdownAction {
-            shutdown_flags,
-            notify_events,
-            send_rst,
-            arm_close_timeout: local_fully_closed && !send_rst,
-        }
+        // The caller will notify the pollee _after_ removing the connection from the table.
     }
 
-    fn prepare_drop(&self) -> DropAction {
-        let mut state = self.state.lock();
-        match state.phase {
+    fn do_rst(&mut self) -> bool {
+        match self.phase {
             Phase::Connecting => {
-                state.phase = Phase::Closed;
-                DropAction {
-                    table_action: DropTableAction::Remove,
-                    shutdown_flags: VirtioVsockShutdownFlags::empty(),
-                    send_rst: true,
-                    arm_close_timeout: false,
-                }
+                self.phase = Phase::ConnectFailed;
+                self.error = Some(Error::with_message(
+                    Errno::ECONNREFUSED,
+                    "the connection is refused",
+                ));
+                self.shutdown.local_read_closed = true;
+                self.shutdown.local_write_closed = true;
+                self.timer = None;
+
+                true
             }
-            Phase::Closed => DropAction {
-                table_action: DropTableAction::Remove,
-                shutdown_flags: VirtioVsockShutdownFlags::empty(),
-                send_rst: false,
-                arm_close_timeout: false,
-            },
-            Phase::Connected | Phase::Closing => {
-                drop(state);
-                let shutdown_action = self.prepare_local_shutdown(SockShutdownCmd::SHUT_RDWR);
-                let peer_fully_closed = {
-                    let state = self.state.lock();
-                    state.shutdown.peer_read_closed && state.shutdown.peer_write_closed
-                };
-                let table_action = if shutdown_action.send_rst {
-                    DropTableAction::Remove
-                } else if peer_fully_closed {
-                    DropTableAction::MoveToClosing
-                } else {
-                    DropTableAction::Keep
-                };
-                DropAction {
-                    table_action,
-                    shutdown_flags: shutdown_action.shutdown_flags,
-                    send_rst: shutdown_action.send_rst,
-                    arm_close_timeout: shutdown_action.arm_close_timeout,
-                }
+            Phase::Connected => {
+                self.phase = Phase::Closed;
+                self.error = Some(Error::with_message(
+                    Errno::ECONNRESET,
+                    "the connection is reset",
+                ));
+                self.shutdown.local_read_closed = true;
+                self.shutdown.local_write_closed = true;
+
+                true
             }
+            Phase::Closing => {
+                self.phase = Phase::Closed;
+                self.timer = None;
+
+                true
+            }
+
+            Phase::ConnectFailed | Phase::Closed => false,
+        }
+    }
+
+    fn update_peer_credit(&mut self, conn: &ConnectionInner, header: &VirtioVsockHdr) {
+        let mut should_notify = false;
+
+        should_notify |= self.credit.peer_buf_alloc < header.buf_alloc();
+        self.credit.peer_buf_alloc = header.buf_alloc();
+
+        should_notify |= self.credit.peer_fwd_cnt != header.fwd_cnt();
+        self.credit.peer_fwd_cnt = header.fwd_cnt();
+
+        if should_notify {
+            conn.pollee.notify(IoEvents::OUT);
         }
     }
 }

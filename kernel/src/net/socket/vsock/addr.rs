@@ -6,22 +6,17 @@ pub const VMADDR_CID_ANY: u32 = u32::MAX;
 pub const VMADDR_PORT_ANY: u32 = u32::MAX;
 pub const VMADDR_CID_HOST: u32 = 2;
 
+pub const UNSPECIFIED_VSOCK_ADDR: VsockSocketAddr = VsockSocketAddr {
+    cid: VMADDR_CID_ANY,
+    port: VMADDR_PORT_ANY,
+};
+
 /// Represents a vsock socket address.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Pod)]
 #[repr(C)]
 pub struct VsockSocketAddr {
     pub cid: u32,
     pub port: u32,
-}
-
-impl VsockSocketAddr {
-    pub const fn is_any_cid(&self) -> bool {
-        self.cid == VMADDR_CID_ANY
-    }
-
-    pub const fn is_any_port(&self) -> bool {
-        self.port == VMADDR_PORT_ANY
-    }
 }
 
 impl TryFrom<SocketAddr> for VsockSocketAddr {

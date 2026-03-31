@@ -4,7 +4,7 @@ use crate::{
     events::IoEvents,
     net::socket::{
         util::{SendRecvFlags, SockShutdownCmd},
-        vsock::addr::VsockSocketAddr,
+        vsock::{addr::VsockSocketAddr, backend::Connection},
     },
     prelude::*,
     process::signal::Pollee,
@@ -12,27 +12,16 @@ use crate::{
 };
 
 pub(super) struct ConnectedStream {
-    connection: super::super::backend::Connection,
+    connection: Connection,
     is_new_connection: bool,
 }
 
 impl ConnectedStream {
-    pub(super) fn new(
-        connection: super::super::backend::Connection,
-        is_new_connection: bool,
-    ) -> Self {
+    pub(super) fn new(connection: Connection, is_new_connection: bool) -> Self {
         Self {
             connection,
             is_new_connection,
         }
-    }
-
-    pub(super) fn try_send(
-        &mut self,
-        reader: &mut dyn MultiRead,
-        flags: SendRecvFlags,
-    ) -> Result<usize> {
-        self.connection.try_send(reader, flags)
     }
 
     pub(super) fn try_recv(
@@ -43,20 +32,24 @@ impl ConnectedStream {
         self.connection.try_recv(writer, flags)
     }
 
-    pub(super) fn shutdown(&mut self, cmd: SockShutdownCmd, _pollee: &Pollee) -> Result<()> {
+    pub(super) fn try_send(
+        &mut self,
+        reader: &mut dyn MultiRead,
+        flags: SendRecvFlags,
+    ) -> Result<usize> {
+        self.connection.try_send(reader, flags)
+    }
+
+    pub(super) fn shutdown(&mut self, cmd: SockShutdownCmd) -> Result<()> {
         self.connection.shutdown(cmd)
     }
 
-    pub(super) fn local_addr(&self, guest_cid: u32) -> VsockSocketAddr {
-        self.connection.local_addr(guest_cid)
+    pub(super) fn local_addr(&self) -> VsockSocketAddr {
+        self.connection.local_addr()
     }
 
     pub(super) fn remote_addr(&self) -> VsockSocketAddr {
         self.connection.remote_addr()
-    }
-
-    pub(super) fn init_pollee(&self, pollee: Pollee) {
-        self.connection.init_pollee(pollee);
     }
 
     pub(super) fn finish_last_connect(&mut self) -> Result<()> {
@@ -70,5 +63,9 @@ impl ConnectedStream {
 
     pub(super) fn check_io_events(&self) -> IoEvents {
         self.connection.check_io_events()
+    }
+
+    pub(super) fn pollee(&self) -> &Pollee {
+        self.connection.pollee()
     }
 }

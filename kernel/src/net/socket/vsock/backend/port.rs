@@ -3,12 +3,16 @@
 use alloc::collections::btree_map::BTreeMap;
 
 use crate::{
-    error::Errno,
+    error::{Errno, Error},
     net::socket::vsock::{
         addr::{VMADDR_CID_ANY, VMADDR_PORT_ANY, VsockSocketAddr},
-        backend::space::{VsockSpace, vsock_space},
+        backend::{
+            Connection, Listener,
+            space::{VsockSpace, vsock_space},
+        },
     },
     prelude::Result,
+    process::signal::Pollee,
     return_errno_with_message,
 };
 
@@ -104,9 +108,23 @@ impl BoundPort {
         }
     }
 
-    pub(in crate::net::socket::vsock) fn connect(self) {}
+    pub(in crate::net::socket::vsock) fn connect(
+        self,
+        remote_addr: VsockSocketAddr,
+        pollee: &Pollee,
+    ) -> core::result::Result<Connection, (Error, BoundPort)> {
+        let vsock_space = self.vsock_space();
+        vsock_space.new_connection(self, remote_addr, pollee)
+    }
 
-    pub(in crate::net::socket::vsock) fn listen(self) {}
+    pub(in crate::net::socket::vsock) fn listen(
+        self,
+        backlog: usize,
+        pollee: &Pollee,
+    ) -> core::result::Result<Listener, (Error, BoundPort)> {
+        let vsock_space = self.vsock_space();
+        vsock_space.new_listener(self, backlog, pollee)
+    }
 
     pub(in crate::net::socket::vsock) fn local_addr(&self) -> VsockSocketAddr {
         VsockSocketAddr {

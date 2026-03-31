@@ -3,11 +3,10 @@
 use aster_softirq::BottomHalfDisabled;
 use aster_virtio::device::vsock::{
     device::VsockDevice,
-    header::{VirtioVsockHdr, VirtioVsockOp},
+    header::{VirtioVsockHdr, VirtioVsockOp, VirtioVsockShutdownFlags, VirtioVsockType},
     packet::{RxPacket, TxPacket},
 };
-use log::debug;
-use ostd::sync::SpinLock;
+use ostd::sync::{PreemptDisabled, SpinLock};
 use spin::Once;
 
 use crate::{
@@ -15,8 +14,11 @@ use crate::{
     net::socket::vsock::{
         addr::VsockSocketAddr,
         backend::{
-            BoundPort, Connection, ConnectionInner, Listener, ListenerInner, MAX_BACKLOG,
-            connection::ConnId, port::PortTable,
+            BoundPort, Connection, Listener,
+            connection::{ConnId, ConnectionInner},
+            listener::ListenerInner,
+            port::PortTable,
+            timer::TimerEvent,
         },
     },
     prelude::*,
@@ -30,8 +32,8 @@ pub(super) struct VsockSpace {
 }
 
 struct SocketTable {
-    listeners: BTreeMap<u32, Arc<ListenerInner>>,
     connections: BTreeMap<ConnId, Arc<ConnectionInner>>,
+    listeners: BTreeMap<u32, Arc<ListenerInner>>,
 }
 
 impl VsockSpace {
@@ -40,8 +42,8 @@ impl VsockSpace {
             device,
             ports: SpinLock::new(PortTable::new()),
             sockets: SpinLock::new(SocketTable {
-                listeners: BTreeMap::new(),
                 connections: BTreeMap::new(),
+                listeners: BTreeMap::new(),
             }),
         }
     }
@@ -54,329 +56,227 @@ impl VsockSpace {
         self.device.guest_cid()
     }
 
-    pub(super) fn lock_ports(&self) -> SpinLockGuard<'_, PortTable> {
+    pub(super) fn lock_ports(&self) -> SpinLockGuard<'_, PortTable, PreemptDisabled> {
         self.ports.lock()
+    }
+}
+
+impl VsockSpace {
+    pub(super) fn new_connection(
+        &self,
+        bound_port: BoundPort,
+        remote_addr: VsockSocketAddr,
+        pollee: &Pollee,
+    ) -> core::result::Result<Connection, (Error, BoundPort)> {
+        use alloc::collections::btree_map::Entry;
+
+        let mut sockets = self.sockets.lock();
+
+        let conn_id = ConnId::from_port_and_remote(&bound_port, remote_addr);
+        let Entry::Vacant(entry) = sockets.connections.entry(conn_id) else {
+            return Err((
+                Error::with_message(Errno::EADDRINUSE, "the vsock connection already exists"),
+                bound_port,
+            ));
+        };
+
+        let inner = ConnectionInner::new_connecting(bound_port, &conn_id, pollee.clone());
+        entry.insert(inner.clone());
+
+        Ok(Connection::new(inner))
+    }
+
+    pub(super) fn remove_connection(&self, connection: &Arc<ConnectionInner>) {
+        use alloc::collections::btree_map::Entry;
+
+        let mut sockets = self.sockets.lock();
+
+        let conn_id = connection.conn_id();
+
+        // The following early returns may reach due to some race conditions between user
+        // operations and incoming packets. But we can safely ignore this case if it happens.
+        let Entry::Occupied(occupied) = sockets.connections.entry(conn_id) else {
+            return;
+        };
+        if !Arc::ptr_eq(connection, occupied.get()) {
+            return;
+        }
+
+        occupied.remove();
     }
 
     pub(super) fn new_listener(
         &self,
         bound_port: BoundPort,
         backlog: usize,
-        pollee: Pollee,
+        pollee: &Pollee,
     ) -> core::result::Result<Listener, (Error, BoundPort)> {
-        let port = bound_port.port();
-        let backlog = backlog.min(MAX_BACKLOG);
-
-        let inner = Arc::new(ListenerInner::new(bound_port, backlog, pollee));
+        use alloc::collections::btree_map::Entry;
 
         let mut sockets = self.sockets.lock();
-        if sockets.listeners.contains_key(&port) {
-            let bound_port = Arc::into_inner(inner)
-                .expect("new listener should not be shared before insertion")
-                .into_bound_port();
-            debug_assert_eq!(bound_port.port(), port);
+
+        let port = bound_port.port();
+        let Entry::Vacant(entry) = sockets.listeners.entry(port) else {
             return Err((
                 Error::with_message(Errno::EADDRINUSE, "the vsock listener already exists"),
                 bound_port,
             ));
-        }
-        sockets.listeners.insert(port, inner.clone());
+        };
+
+        let inner = ListenerInner::new(bound_port, backlog, pollee.clone());
+        entry.insert(inner.clone());
 
         Ok(Listener::new(inner))
     }
 
-    pub(super) fn new_connection(
-        &self,
-        bound_port: BoundPort,
-        remote_addr: VsockSocketAddr,
-        pollee: Pollee,
-    ) -> core::result::Result<Connection, (Error, BoundPort)> {
-        let port = bound_port.port();
+    pub(super) fn remove_listener(&self, listener: &Arc<ListenerInner>) {
+        use alloc::collections::btree_map::Entry;
 
-        let inner = ConnectionInner::new_connecting(bound_port, remote_addr);
-        inner.init_pollee(pollee);
-
-        if let Err(error) = self.insert_connection(&inner) {
-            let bound_port = Arc::into_inner(inner)
-                .expect("new connection should not be shared before insertion")
-                .into_bound_port();
-            debug_assert_eq!(bound_port.port(), port);
-            return Err((error, bound_port));
-        }
-
-        let connection = Connection::new(inner);
-        // connection
-
-        self.send_packet(header);
-
-        Ok(Connection::new(inner))
-    }
-
-    pub(super) fn insert_connection(&self, connection: &Arc<ConnectionInner>) -> Result<()> {
         let mut sockets = self.sockets.lock();
-        let conn_id = connection.conn_id();
-        if sockets.connections.contains_key(&conn_id) {
-            return_errno_with_message!(Errno::EADDRINUSE, "the vsock connection already exists");
-        }
-        sockets.connections.insert(conn_id, connection.clone());
-        Ok(())
-    }
 
-    pub(super) fn remove_connection(&self, conn_id: &ConnId) {
-        self.sockets.lock().connections.remove(conn_id);
-    }
+        let port = listener.bound_port().port();
+        let removed = sockets.listeners.remove(&port);
+        debug_assert!(
+            removed
+                .as_ref()
+                .is_some_and(|removed| Arc::ptr_eq(removed, listener))
+        );
 
-    pub(super) fn shutdown_listener(&self, listener: &Arc<ListenerInner>) {
-        let drained_connections = {
-            let mut sockets = self.sockets.lock();
-            sockets.listeners.remove(&listener.bound_port.port());
-            let drained_connections = listener.take_incoming_on_shutdown();
-            for connection in &drained_connections {
-                sockets.connections.remove(&connection.conn_id());
+        let connections = listener.take_incoming_on_removal();
+        for connection in connections.into_iter() {
+            let conn_id = connection.conn_id();
+
+            // The following `continue`s may reach due to some race conditions between user
+            // operations and incoming packets. But we can safely ignore this case if it happens.
+            let Entry::Occupied(occupied) = sockets.connections.entry(conn_id) else {
+                continue;
+            };
+            if !Arc::ptr_eq(&connection, occupied.get()) {
+                continue;
             }
-            drained_connections
-        };
-        listener.notify_shutdown();
-        for connection in drained_connections {
-            self.reset_removed_connection(connection);
+
+            occupied.remove();
+
+            connection.active_rst();
+            // No need to notify the pollee since the connection isn't even accepted.
         }
     }
+}
 
+impl VsockSpace {
     pub(super) fn process_rx(&self) {
         let mut rx = self.device.lock_rx();
+        let mut sockets = self.sockets.lock();
 
         while let Some(packet) = rx.recv() {
-            self.process_rx_packet(packet);
+            self.process_rx_packet(&mut sockets, packet);
         }
     }
 
-    fn process_rx_packet(&self, packet: RxPacket) {
+    fn process_rx_packet(&self, sockets: &mut SocketTable, packet: RxPacket) {
+        use alloc::collections::btree_map::Entry;
+
         let header = packet.header();
 
-        if !self.validate_rx_header(&header, &packet) {
-            self.send_raw_rst(&header);
-            return;
-        }
+        let conn_id = ConnId::from_incoming_header(&header);
+        let entry = sockets.connections.entry(conn_id);
 
-        let Some(op) = header.op() else {
-            self.send_raw_rst(&header);
-            return;
-        };
-
-        match op {
-            VirtioVsockOp::Request => self.process_request(header),
-            VirtioVsockOp::Response => self.process_response(header),
-            VirtioVsockOp::Rst => {
-                if let Some(connection) = self.remove_connection_for_rst(&header) {
-                    self.reset_removed_connection(connection);
-                }
+        match entry {
+            Entry::Vacant(vacant) => {
+                self.process_rx_connect(&sockets.listeners, vacant, &header, packet)
             }
-            VirtioVsockOp::Shutdown => self.process_shutdown_packet(header),
-            VirtioVsockOp::Rw => self.process_rw_packet(header, packet),
-            VirtioVsockOp::CreditUpdate => self.process_credit_update(header),
-            VirtioVsockOp::CreditRequest => {
-                self.process_credit_request(header);
-            }
+            Entry::Occupied(occupied) => self.process_rx_connection(occupied, &header, packet),
         }
     }
 
-    fn process_request(&self, header: VirtioVsockHdr) {
-        let dst_port = header.dst_port();
-        let listener = {
-            let sockets = self.sockets.lock();
-            sockets.listeners.get(&dst_port).cloned()
-        };
-        let Some(listener) = listener else {
-            self.send_raw_rst(&header);
-            return;
-        };
-
-        let bound_port = BoundPort::new_shared(listener.bound_port());
-        let remote_addr = VsockSocketAddr {
-            cid: header.src_cid() as u32,
-            port: header.src_port(),
-        };
-        let connection = ConnectionInner::new_connected(bound_port, remote_addr);
-        let _ = connection.on_credit_update(header.buf_alloc(), header.fwd_cnt());
-
-        if self.insert_connection(&connection).is_err()
-            || listener.push_incoming(connection.clone()).is_err()
-        {
-            let conn_id = connection.conn_id();
-            self.remove_connection(&conn_id);
-            self.send_raw_rst(&header);
-            return;
-        }
-
-        if let Err(error) = self.send_connection_control_packet(
-            &connection,
-            VirtioVsockOp::Response,
-            0,
-            PendingSendAction::MarkCreditReported,
-        ) {
-            debug!("failed to send vsock response packet: {:?}", error);
-            self.reset_connection(connection);
-        }
-    }
-
-    fn process_response(&self, header: VirtioVsockHdr) {
-        let conn_id = Self::conn_id_from_header(&header);
-        let (credit_pollee, response_pollee) = {
-            let sockets = self.sockets.lock();
-            let Some(connection) = sockets.connections.get(&conn_id) else {
-                return;
-            };
-            (
-                connection.on_credit_update(header.buf_alloc(), header.fwd_cnt()),
-                connection.on_response(),
-            )
-        };
-        if let Some(pollee) = credit_pollee {
-            pollee.notify(IoEvents::OUT);
-        }
-        if let Some(pollee) = response_pollee {
-            pollee.notify(IoEvents::OUT);
-        }
-    }
-
-    fn process_shutdown_packet(&self, header: VirtioVsockHdr) {
-        let guest_cid = self.guest_cid();
-        let conn_id = Self::conn_id_from_header(&header);
-        let (credit_pollee, shutdown_pollee, notify_events, rst_header) = {
-            let mut sockets = self.sockets.lock();
-            let Some(connection) = sockets.connections.remove(&conn_id) else {
-                return;
-            };
-            let credit_pollee = connection.on_credit_update(header.buf_alloc(), header.fwd_cnt());
-            let shutdown_action = connection.on_shutdown(header.flags());
-            let rst_header = shutdown_action
-                .send_rst
-                .then(|| connection.make_header(guest_cid, VirtioVsockOp::Rst, 0, 0));
-
-            if shutdown_action.remove_lookup_key {
-                if !shutdown_action.send_rst {
-                    sockets
-                        .closing_connections
-                        .entry(conn_id)
-                        .or_default()
-                        .push(connection);
-                }
-            } else {
-                sockets.connections.insert(conn_id, connection);
-            }
-
-            (
-                credit_pollee,
-                shutdown_action.notify_pollee,
-                shutdown_action.notify_events,
-                rst_header,
-            )
-        };
-
-        if let Some(pollee) = credit_pollee {
-            pollee.notify(IoEvents::OUT);
-        }
-        if let Some(pollee) = shutdown_pollee {
-            pollee.notify(notify_events);
-        }
-        if let Some(rst_header) = rst_header {
-            let _ = self.send_packet(rst_header, None);
-        }
-    }
-
-    fn process_rw_packet(
+    fn process_rx_connect(
         &self,
-        header: VirtioVsockHdr,
-        buffer: aster_virtio::device::vsock::RxBuffer,
+        listeners: &BTreeMap<u32, Arc<ListenerInner>>,
+        vacant_conn: alloc::collections::btree_map::VacantEntry<'_, ConnId, Arc<ConnectionInner>>,
+        header: &VirtioVsockHdr,
+        packet: RxPacket,
     ) {
-        let conn_id = Self::conn_id_from_header(&header);
-        let packet_action = {
-            let mut sockets = self.sockets.lock();
-            let Some(connection) = sockets.connections.remove(&conn_id) else {
-                return self.send_raw_rst(&header);
-            };
-            let credit_pollee = connection.on_credit_update(header.buf_alloc(), header.fwd_cnt());
-            match connection.enqueue_rx_buffer(buffer) {
-                Ok(rx_pollee) => {
-                    sockets.connections.insert(conn_id, connection);
-                    Ok((credit_pollee, rx_pollee))
-                }
-                Err(error) => Err((connection, credit_pollee, error)),
-            }
-        };
-        match packet_action {
-            Ok((credit_pollee, rx_pollee)) => {
-                if let Some(pollee) = credit_pollee {
-                    pollee.notify(IoEvents::OUT);
-                }
-                if let Some(pollee) = rx_pollee {
-                    pollee.notify(IoEvents::IN);
-                }
-            }
-            Err((connection, credit_pollee, _error)) => {
-                if let Some(pollee) = credit_pollee {
-                    pollee.notify(IoEvents::OUT);
-                }
-                self.reset_removed_connection(connection);
-                self.send_raw_rst(&header);
-            }
+        if header.op() != Some(VirtioVsockOp::Request)
+            || !self.validate_rx_header(VirtioVsockOp::Request, header, &packet)
+        {
+            self.send_raw_rst(header);
+            return;
         }
+
+        let listener = if let Some(listener) = listeners.get(&header.dst_port())
+            && !listener.is_full()
+        {
+            listener
+        } else {
+            self.send_raw_rst(header);
+            return;
+        };
+
+        let bound_port = BoundPort::new_shared(&listener.bound_port());
+        let conn_id = vacant_conn.key();
+
+        let inner = ConnectionInner::new_connected(bound_port, conn_id);
+        vacant_conn.insert(inner.clone());
+
+        listener.push_incoming(inner.clone());
     }
 
-    fn process_credit_update(&self, header: VirtioVsockHdr) {
-        let conn_id = Self::conn_id_from_header(&header);
-        let credit_pollee = {
-            let sockets = self.sockets.lock();
-            let Some(connection) = sockets.connections.get(&conn_id) else {
-                return;
-            };
-            connection.on_credit_update(header.buf_alloc(), header.fwd_cnt())
+    fn process_rx_connection(
+        &self,
+        occupied_conn: alloc::collections::btree_map::OccupiedEntry<
+            '_,
+            ConnId,
+            Arc<ConnectionInner>,
+        >,
+        header: &VirtioVsockHdr,
+        packet: RxPacket,
+    ) {
+        let op = if let Some(op) = header.op()
+            && self.validate_rx_header(op, header, &packet)
+        {
+            op
+        } else {
+            Self::reset_removed_connection(occupied_conn.remove());
+            return;
         };
-        if let Some(pollee) = credit_pollee {
-            pollee.notify(IoEvents::OUT);
-        }
-    }
 
-    fn process_credit_request(&self, header: VirtioVsockHdr) {
-        let guest_cid = self.guest_cid();
-        let conn_id = Self::conn_id_from_header(&header);
-        let (credit_pollee, response_header) = {
-            let sockets = self.sockets.lock();
-            let Some(connection) = sockets.connections.get(&conn_id) else {
-                return;
-            };
-            (
-                connection.on_credit_update(header.buf_alloc(), header.fwd_cnt()),
-                connection.make_header(guest_cid, VirtioVsockOp::CreditUpdate, 0, 0),
-            )
+        let connection = occupied_conn.get();
+
+        let should_remove = match op {
+            VirtioVsockOp::Request => {
+                connection.active_rst();
+                true
+            }
+            VirtioVsockOp::Response => connection.on_response(header).is_err(),
+            VirtioVsockOp::Rst => {
+                connection.on_rst();
+                true
+            }
+            VirtioVsockOp::Shutdown => connection.on_shutdown(header),
+            VirtioVsockOp::Rw => connection.on_rw(header, packet).is_err(),
+            VirtioVsockOp::CreditUpdate => {
+                connection.on_credit_update(header);
+                false
+            }
+            VirtioVsockOp::CreditRequest => {
+                connection.on_credit_update(header);
+                false
+            }
         };
-        if let Some(pollee) = credit_pollee {
-            pollee.notify(IoEvents::OUT);
-        }
-        let completion = Box::new(DeferredConnectionSend::new(
-            conn_id,
-            PendingSendAction::MarkCreditReported,
-        ));
-        match self.send_packet(response_header, Some(completion)) {
-            Ok(aster_virtio::device::vsock::TxSubmit::SubmittedToQueue) => {
-                self.apply_pending_send_action(conn_id, PendingSendAction::MarkCreditReported);
-            }
-            Ok(aster_virtio::device::vsock::TxSubmit::QueuedInSoftwarePending) => {}
-            Err(error) => {
-                debug!("failed to send vsock credit update packet: {:?}", error);
-            }
-        }
-    }
 
-    fn remove_connection_for_rst(&self, header: &VirtioVsockHdr) -> Option<Arc<ConnectionInner>> {
-        let conn_id = Self::conn_id_from_header(header);
-        let mut sockets = self.sockets.lock();
-        sockets.connections.remove(&conn_id)
+        if should_remove {
+            Self::notify_removed_connection(occupied_conn.remove());
+        }
     }
 
     fn send_raw_rst(&self, header: &VirtioVsockHdr) {
+        if header.op == VirtioVsockOp::Rst as u16 {
+            // Do not send an RST packet in response to an RST packet. Otherwise, we may loop.
+            return;
+        }
+
         let rst_header = VirtioVsockHdr::new(
-            self.guest_cid(),
+            header.dst_cid(),
             header.src_cid(),
             header.dst_port(),
             header.src_port(),
@@ -386,76 +286,59 @@ impl VsockSpace {
             0,
             0,
         );
-        self.send_packet(rst_header);
+        self.send_packet(&rst_header);
     }
 
-    pub(super) fn process_event(&self) {
-        let connections = {
-            let mut sockets = self.sockets.lock();
-            core::mem::take(&mut sockets.connections)
-        };
+    pub(super) fn process_transport_event(&self) {
+        let mut sockets = self.sockets.lock();
 
-        for connection in connections.into_values() {
-            self.reset_removed_connection(connection);
+        // Query the guest CID after locking `sockets` to avoid race conditions.
+        let guest_cid = self.guest_cid();
+
+        let connections = core::mem::take(&mut sockets.connections);
+
+        for (conn_id, connection) in connections.into_iter() {
+            if conn_id.local_cid == guest_cid {
+                sockets.connections.insert(conn_id, connection);
+                continue;
+            }
+
+            Self::reset_removed_connection(connection);
         }
     }
 
-    fn reset_connection(&self, connection: Arc<ConnectionInner>) {
-        self.remove_connection_instance(&connection);
-        self.reset_removed_connection(connection);
+    pub(super) fn process_timer_events(&self, events: Vec<TimerEvent>) {
+        use alloc::collections::btree_map::Entry;
+
+        let mut sockets = self.sockets.lock();
+
+        for event in events.into_iter() {
+            let Entry::Occupied(entry) = sockets.connections.entry(event.conn_id) else {
+                continue;
+            };
+
+            if !entry.get().on_timeout(event.generation) {
+                continue;
+            }
+
+            Self::notify_removed_connection(entry.remove());
+        }
     }
 
-    fn reset_removed_connection(&self, connection: Arc<ConnectionInner>) {
-        let pollee = connection.on_rst();
+    fn reset_removed_connection(connection: Arc<ConnectionInner>) {
+        connection.active_rst();
+        Self::notify_removed_connection(connection);
+    }
+
+    fn notify_removed_connection(connection: Arc<ConnectionInner>) {
+        let pollee = connection.pollee().clone();
         drop(connection);
 
-        if let Some(pollee) = pollee {
-            pollee.notify(IoEvents::ERR | IoEvents::IN | IoEvents::OUT);
-        }
+        pollee
+            .notify(IoEvents::IN | IoEvents::OUT | IoEvents::ERR | IoEvents::RDHUP | IoEvents::HUP);
     }
 
-    pub(super) fn process_timer_event(&self, event: ConnectionTimerEvent) -> bool {
-        let guest_cid = self.guest_cid();
-        let active_result = {
-            let mut sockets = self.sockets.lock();
-            if let Some(connection) = sockets.connections.remove(&event.conn_id) {
-                let timeout_action = connection.on_timeout(event.generation);
-                if let Some(timeout_action) = timeout_action {
-                    Some((connection, timeout_action))
-                } else {
-                    sockets.connections.insert(event.conn_id, connection);
-                    None
-                }
-            } else {
-                None
-            }
-        };
-        if let Some((connection, timeout_action)) = active_result {
-            let rst_header = timeout_action
-                .send_rst
-                .then(|| connection.make_header(guest_cid, VirtioVsockOp::Rst, 0, 0));
-            drop(connection);
-            if let Some(pollee) = timeout_action.notify_pollee {
-                pollee.notify(IoEvents::ERR | IoEvents::IN | IoEvents::OUT);
-            }
-            if let Some(rst_header) = rst_header {
-                let _ = self.send_packet(rst_header, None);
-            }
-            return true;
-        }
-
-        false
-    }
-
-    fn conn_id_from_header(header: &VirtioVsockHdr) -> ConnId {
-        ConnId {
-            local_port: header.dst_port(),
-            peer_cid: header.src_cid() as u32,
-            peer_port: header.src_port(),
-        }
-    }
-
-    pub(super) fn send_packet(&self, header: VirtioVsockHdr) {
+    pub(super) fn send_packet(&self, header: &VirtioVsockHdr) {
         let Ok(builder) = TxPacket::new_builder() else {
             log::warn!("failed to allocate vsock packet: {:?}", header);
             return;
@@ -471,14 +354,36 @@ impl VsockSpace {
         }
     }
 
-    fn validate_rx_header(&self, header: &VirtioVsockHdr, packet: &RxPacket) -> bool {
-        if header.type_ != 1 {
+    fn validate_rx_header(
+        &self,
+        op: VirtioVsockOp,
+        header: &VirtioVsockHdr,
+        packet: &RxPacket,
+    ) -> bool {
+        if header.type_ != VirtioVsockType::Stream as u16 {
             return false;
         }
+
         if header.dst_cid() != self.guest_cid() {
             return false;
         }
-        packet.payload().remain() == header.len as usize
+
+        let payload_len = packet.payload_len();
+        if payload_len != header.len as usize {
+            return false;
+        }
+
+        match op {
+            VirtioVsockOp::Request
+            | VirtioVsockOp::Response
+            | VirtioVsockOp::Rst
+            | VirtioVsockOp::CreditUpdate
+            | VirtioVsockOp::CreditRequest => payload_len == 0 && header.flags() == 0,
+            VirtioVsockOp::Shutdown => {
+                payload_len == 0 && VirtioVsockShutdownFlags::from_bits(header.flags()).is_some()
+            }
+            VirtioVsockOp::Rw => header.flags() == 0,
+        }
     }
 }
 

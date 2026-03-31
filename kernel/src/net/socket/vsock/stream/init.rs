@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use super::{connecting::ConnectingStream, listen::ListenStream};
 use crate::{
     events::IoEvents,
     net::socket::{
         util::SocketAddr,
         vsock::{
-            addr::{VMADDR_CID_ANY, VsockSocketAddr},
-            backend::{BoundPort, vsock_space},
+            addr::{UNSPECIFIED_VSOCK_ADDR, VMADDR_CID_ANY, VMADDR_CID_HOST, VsockSocketAddr},
+            backend::BoundPort,
+            stream::{ConnectingStream, ListenStream},
         },
     },
     prelude::*,
@@ -45,21 +45,21 @@ impl InitStream {
         }
     }
 
-    pub(super) fn bind(&mut self, addr: &VsockSocketAddr) -> Result<()> {
+    pub(super) fn bind(&mut self, addr: VsockSocketAddr) -> Result<()> {
         if self.bound_port.is_some() {
             return_errno_with_message!(Errno::EINVAL, "the socket is already bound");
         }
 
-        self.bound_port = Some(vsock_space().bind_port(addr)?);
+        self.bound_port = Some(BoundPort::new_bind(addr)?);
         Ok(())
     }
 
     pub(super) fn connect(
         self,
-        remote_addr: &VsockSocketAddr,
-        pollee: Pollee,
+        remote_addr: VsockSocketAddr,
+        pollee: &Pollee,
     ) -> core::result::Result<ConnectingStream, (Error, Self)> {
-        if remote_addr.cid != super::super::addr::VMADDR_CID_HOST {
+        if remote_addr.cid != VMADDR_CID_HOST {
             return Err((
                 Error::with_message(Errno::EOPNOTSUPP, "only host vsock cid is supported"),
                 self,
@@ -69,13 +69,13 @@ impl InitStream {
         let bound_port = if let Some(bound_port) = self.bound_port {
             bound_port
         } else {
-            match vsock_space().get_ephemeral_port() {
+            match BoundPort::new_ephemeral() {
                 Ok(bound_port) => bound_port,
                 Err(error) => return Err((error, self)),
             }
         };
 
-        ConnectingStream::new(bound_port, *remote_addr, pollee)
+        ConnectingStream::new(bound_port, remote_addr, pollee)
             .map_err(|(error, bound_port)| (error, Self::new_bound(bound_port)))
     }
 
@@ -98,7 +98,7 @@ impl InitStream {
     pub(super) fn listen(
         self,
         backlog: usize,
-        pollee: Pollee,
+        pollee: &Pollee,
     ) -> core::result::Result<ListenStream, (Error, Self)> {
         if !self.is_connect_done {
             return Err((
@@ -118,13 +118,7 @@ impl InitStream {
         };
 
         ListenStream::new(bound_port, backlog, pollee)
-            .map_err(|(bound_port, error)| (error, Self::new_bound(bound_port)))
-    }
-
-    pub(super) fn local_addr(&self, guest_cid: u32) -> Option<VsockSocketAddr> {
-        self.bound_port
-            .as_ref()
-            .map(|bound_port| bound_port.local_addr(guest_cid))
+            .map_err(|(error, bound_port)| (error, Self::new_bound(bound_port)))
     }
 
     pub(super) fn try_recv(&mut self) -> Result<(usize, SocketAddr)> {
@@ -132,26 +126,25 @@ impl InitStream {
             return_errno_with_message!(Errno::ENOTCONN, "the socket is not connected");
         }
 
-        if let Some(error) = self.test_and_clear_error() {
+        if let Some(error) = self.last_connect_error.take() {
             return Err(error);
         }
 
-        Ok((
-            0,
-            VsockSocketAddr {
-                cid: VMADDR_CID_ANY,
-                port: 0,
-            }
-            .into(),
-        ))
+        Ok((0, UNSPECIFIED_VSOCK_ADDR.into()))
     }
 
     pub(super) fn try_send(&mut self) -> Result<usize> {
-        if let Some(error) = self.test_and_clear_error() {
+        if let Some(error) = self.last_connect_error.take() {
             return Err(error);
         }
 
         return_errno_with_message!(Errno::EPIPE, "the socket is not connected")
+    }
+
+    pub(super) fn local_addr(&self) -> Option<VsockSocketAddr> {
+        self.bound_port
+            .as_ref()
+            .map(|bound_port| bound_port.local_addr())
     }
 
     pub(super) fn check_io_events(&self) -> IoEvents {
@@ -160,9 +153,5 @@ impl InitStream {
             events |= IoEvents::ERR;
         }
         events
-    }
-
-    pub(super) fn test_and_clear_error(&mut self) -> Option<Error> {
-        self.last_connect_error.take()
     }
 }
