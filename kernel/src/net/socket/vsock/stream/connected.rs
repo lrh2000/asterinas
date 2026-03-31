@@ -40,7 +40,7 @@ impl ConnectedStream {
         self.connection.try_send(reader, flags)
     }
 
-    pub(super) fn shutdown(&mut self, cmd: SockShutdownCmd) -> Result<()> {
+    pub(super) fn shutdown(&self, cmd: SockShutdownCmd) -> Result<()> {
         self.connection.shutdown(cmd)
     }
 
@@ -59,6 +59,10 @@ impl ConnectedStream {
 
         self.is_new_connection = false;
         Ok(())
+    }
+
+    pub(super) fn test_and_clear_error(&self) -> Option<Error> {
+        self.connection.test_and_clear_error().err()
     }
 
     pub(super) fn check_io_events(&self) -> IoEvents {

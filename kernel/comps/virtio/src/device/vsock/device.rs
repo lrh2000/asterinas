@@ -16,7 +16,7 @@ use crate::{
         VirtioDeviceError,
         vsock::{
             DEVICE_NAME,
-            config::VirtioVsockConfig,
+            config::{VirtioVsockConfig, VsockFeatures},
             header::VirtioVsockEventId,
             queue::{EventQueue, RxQueue, TxQueue},
         },
@@ -37,7 +37,7 @@ pub struct VsockDevice {
 
 impl VsockDevice {
     pub(crate) fn negotiate_features(features: u64) -> u64 {
-        features
+        (VsockFeatures::from_bits_truncate(features) & VsockFeatures::supported_features()).bits()
     }
 
     pub(crate) fn init(mut transport: Box<dyn VirtioTransport>) -> Result<(), VirtioDeviceError> {
@@ -130,17 +130,16 @@ impl VsockDevice {
             VirtioVsockEventId::TransportReset => (),
         }
 
-        let guest_cid = VirtioVsockConfig::read_guest_cid(&self.config_manager);
-        if guest_cid == self.guest_cid() {
-            return;
-        }
-        self.guest_cid.store(guest_cid, Ordering::Relaxed);
-
         drop(event_queue);
 
         if let Some(callback) = self.event_callback.get() {
             (callback)();
         }
+    }
+
+    pub fn reload_guest_id(&self) {
+        let guest_cid = VirtioVsockConfig::read_guest_cid(&self.config_manager);
+        self.guest_cid.store(guest_cid, Ordering::Relaxed);
     }
 }
 

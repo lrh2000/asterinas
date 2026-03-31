@@ -5,7 +5,7 @@ use crate::{
     net::socket::{
         util::SocketAddr,
         vsock::{
-            addr::{UNSPECIFIED_VSOCK_ADDR, VMADDR_CID_HOST, VsockSocketAddr},
+            addr::{UNSPECIFIED_VSOCK_ADDR, VMADDR_CID_HOST, VMADDR_PORT_ANY, VsockSocketAddr},
             backend::BoundPort,
             stream::{ConnectingStream, ListenStream},
         },
@@ -61,7 +61,13 @@ impl InitStream {
     ) -> core::result::Result<ConnectingStream, (Error, Self)> {
         if remote_addr.cid != VMADDR_CID_HOST {
             return Err((
-                Error::with_message(Errno::EOPNOTSUPP, "only host vsock cid is supported"),
+                Error::with_message(Errno::ENETUNREACH, "only host vsock cid is supported"),
+                self,
+            ));
+        }
+        if remote_addr.port == VMADDR_PORT_ANY {
+            return Err((
+                Error::with_message(Errno::EINVAL, "any vsock port is invalid to connect"),
                 self,
             ));
         }
@@ -147,8 +153,12 @@ impl InitStream {
             .map(|bound_port| bound_port.local_addr())
     }
 
+    pub(super) fn test_and_clear_error(&mut self) -> Option<Error> {
+        self.last_connect_error.take()
+    }
+
     pub(super) fn check_io_events(&self) -> IoEvents {
-        let mut events = IoEvents::OUT | IoEvents::HUP;
+        let mut events = IoEvents::OUT;
         if self.last_connect_error.is_some() {
             events |= IoEvents::ERR;
         }

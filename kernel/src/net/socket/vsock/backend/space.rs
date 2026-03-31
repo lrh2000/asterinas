@@ -72,6 +72,8 @@ impl VsockSpace {
 
         let mut sockets = self.sockets.lock();
 
+        // Note that we should query the guest CID (part of `from_port_and_remote`) after locking
+        // `sockets` to avoid race conditions with `process_transport_event`.
         let conn_id = ConnId::from_port_and_remote(&bound_port, remote_addr);
         let Entry::Vacant(entry) = sockets.connections.entry(conn_id) else {
             return Err((
@@ -215,7 +217,7 @@ impl VsockSpace {
         let bound_port = BoundPort::new_shared(listener.bound_port());
         let conn_id = vacant_conn.key();
 
-        let inner = ConnectionInner::new_connected(bound_port, conn_id);
+        let inner = ConnectionInner::new_connected(bound_port, conn_id, header);
         vacant_conn.insert(inner.clone());
 
         listener.push_incoming(inner.clone());
@@ -254,14 +256,8 @@ impl VsockSpace {
             }
             VirtioVsockOp::Shutdown => connection.on_shutdown(header),
             VirtioVsockOp::Rw => connection.on_rw(header, packet).is_err(),
-            VirtioVsockOp::CreditUpdate => {
-                connection.on_credit_update(header);
-                false
-            }
-            VirtioVsockOp::CreditRequest => {
-                connection.on_credit_request(header);
-                false
-            }
+            VirtioVsockOp::CreditUpdate => connection.on_credit_update(header).is_err(),
+            VirtioVsockOp::CreditRequest => connection.on_credit_request(header).is_err(),
         };
 
         if should_remove {
@@ -286,25 +282,24 @@ impl VsockSpace {
             0,
             0,
         );
-        self.send_packet(&rst_header);
+        let _ = self.send_packet(&rst_header);
     }
 
     pub(super) fn process_transport_event(&self) {
         let mut sockets = self.sockets.lock();
 
-        // Query the guest CID after locking `sockets` to avoid race conditions.
-        let guest_cid = self.guest_cid();
+        // As stated in the specification, we only need to deal with the connections:
+        // "The driver shuts down established connections and the guest_cid configuration field is
+        // fetched again. Existing listen sockets remain but their CID is updated to reflect the
+        // current guest_cid."
 
         let connections = core::mem::take(&mut sockets.connections);
-
-        for (conn_id, connection) in connections.into_iter() {
-            if conn_id.local_cid == guest_cid {
-                sockets.connections.insert(conn_id, connection);
-                continue;
-            }
-
+        for connection in connections.into_values() {
             Self::reset_removed_connection(connection);
         }
+
+        // The reload of the guest CID is protectd by the `sockets` lock.
+        self.device.reload_guest_id();
     }
 
     pub(super) fn process_timer_events(&self, events: Vec<TimerEvent>) {
@@ -334,14 +329,17 @@ impl VsockSpace {
         let pollee = connection.pollee().clone();
         drop(connection);
 
+        // Notify the pollee after dropping the connection. This ensures the connection's reference
+        // count is one, allowing the socket layer to use the `Connection::into_result` method.
         pollee
-            .notify(IoEvents::IN | IoEvents::OUT | IoEvents::ERR | IoEvents::RDHUP | IoEvents::HUP);
+            .notify(IoEvents::IN | IoEvents::OUT | IoEvents::RDHUP | IoEvents::HUP | IoEvents::ERR);
     }
 
-    pub(super) fn send_packet(&self, header: &VirtioVsockHdr) {
+    #[must_use]
+    pub(super) fn send_packet(&self, header: &VirtioVsockHdr) -> bool {
         let Ok(builder) = TxPacket::new_builder() else {
             log::warn!("failed to allocate vsock packet: {:?}", header);
-            return;
+            return false;
         };
         let packet = builder.build(header);
 
@@ -352,6 +350,8 @@ impl VsockSpace {
                 pending.push_pending(None);
             }
         }
+
+        true
     }
 
     fn validate_rx_header(

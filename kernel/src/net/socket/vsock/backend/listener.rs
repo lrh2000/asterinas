@@ -58,6 +58,8 @@ pub(super) struct ListenerInner {
 
 impl ListenerInner {
     pub(super) fn new(bound_port: BoundPort, backlog: usize, pollee: Pollee) -> Arc<Self> {
+        pollee.invalidate();
+
         Arc::new(Self {
             bound_port,
             pollee,

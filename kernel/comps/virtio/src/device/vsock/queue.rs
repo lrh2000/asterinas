@@ -10,7 +10,7 @@ use ostd::mm::{
 
 use crate::{
     device::vsock::{
-        header::VirtioVsockEventId,
+        header::{VirtioVsockEventId, VirtioVsockHdr},
         packet::{RxPacket, TxPacket},
     },
     queue::VirtQueue,
@@ -42,6 +42,11 @@ impl TxQueue {
     }
 
     pub(super) fn free_processed_tx_buffers(&mut self) {
+        while let Ok((token, _)) = self.queue.pop_used() {
+            debug_assert!(self.inflight[token as usize].is_some());
+            self.inflight[token as usize] = None;
+        }
+
         while self.queue.available_desc() >= 1 {
             let Some(pending) = self.pending.pop_front() else {
                 break;
@@ -64,7 +69,7 @@ impl TxQueue {
     }
 
     pub fn try_send(&mut self, packet: TxPacket) -> core::result::Result<(), TxPendingGuard<'_>> {
-        if !self.inflight.is_empty() && self.queue.available_desc() > 0 {
+        if !self.pending.is_empty() || self.queue.available_desc() == 0 {
             return Err(TxPendingGuard {
                 queue: self,
                 packet,
@@ -141,6 +146,24 @@ impl RxQueue {
     }
 
     pub fn recv(&mut self) -> Option<RxPacket> {
+        while let Some((mut packet, len)) = self.recv_impl() {
+            // As with all other virtio devices, we currently assume that the virtio transport
+            // layer is trustworthy, and therefore so is `len`.
+            //
+            // However, we do not assume that the peer is trustworthy, meaning that `len` may be
+            // smaller than the header size.
+            if len < size_of::<VirtioVsockHdr>() {
+                continue;
+            }
+
+            packet.set_len(len);
+            return Some(packet);
+        }
+
+        None
+    }
+
+    fn recv_impl(&mut self) -> Option<(RxPacket, usize)> {
         if self.pending.is_none() {
             self.pending = RxPacket::new().ok();
         }
@@ -150,11 +173,10 @@ impl RxQueue {
         }
 
         let (token, len) = self.queue.pop_used().ok()?;
-        let mut packet = self.buffers.remove(token as usize).unwrap();
-        packet.set_len(len as usize);
+        let packet = self.buffers.remove(token as usize).unwrap();
 
         let new_packet = self.pending.take().unwrap();
-        let new_token = self.queue.add_dma_buf(&[new_packet.inner()], &[]).unwrap();
+        let new_token = self.queue.add_dma_buf(&[], &[new_packet.inner()]).unwrap();
         debug_assert_eq!(new_token, token);
         self.buffers.put_at(new_token as usize, new_packet);
 
@@ -162,7 +184,7 @@ impl RxQueue {
             self.queue.notify();
         }
 
-        Some(packet)
+        Some((packet, len as usize))
     }
 }
 

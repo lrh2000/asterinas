@@ -3,6 +3,7 @@
 use core::mem::offset_of;
 
 use aster_util::safe_ptr::SafePtr;
+use bitflags::bitflags;
 
 use crate::transport::{ConfigManager, VirtioTransport};
 
@@ -31,5 +32,18 @@ impl VirtioVsockConfig {
             .read_once::<u32>(offset_of!(Self, guest_cid_high))
             .unwrap_or(0);
         (u64::from(guest_cid_high) << 32) | u64::from(guest_cid_low)
+    }
+}
+
+bitflags! {
+    pub(super) struct VsockFeatures: u64 {
+        const VIRTIO_VSOCK_F_STREAM    = 1 << 0;
+        const VIRTIO_VSOCK_F_SEQPACKET = 1 << 1;
+    }
+}
+
+impl VsockFeatures {
+    pub(super) fn supported_features() -> Self {
+        Self::VIRTIO_VSOCK_F_STREAM
     }
 }

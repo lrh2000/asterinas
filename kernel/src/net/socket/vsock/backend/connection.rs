@@ -50,15 +50,38 @@ struct ConnectionState {
     rx_queue: RxQueue,
     credit: CreditState,
     shutdown: ShutdownState,
+    /// Tracks the deadline for leaving [`Phase::Connecting`] or [`Phase::Closing`].
+    ///
+    /// INVARIANT: This is `Some(_)` if and only if the phase is
+    /// [`Phase::Connecting`] or [`Phase::Closing`].
     timer: Option<TimerState>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Phase {
+    /// Represents the initial state of a newly created connection.
     Connecting,
+    /// Represents the state reached from `Connecting` when the connection
+    /// request is rejected or times out.
+    ///
+    /// INVARIANT: In this state, the peer endpoint is fully closed; that is,
+    /// both `peer_write_closed` and `peer_read_closed` are `true`.
     ConnectFailed,
+    /// Represents the initial state of an accepted connection, or the state
+    /// reached from `Connecting` when the connection request succeeds.
     Connected,
+    /// Represents the state reached from `Connected` when the socket is closed
+    /// locally, but the peer has not reset the connection.
+    ///
+    /// INVARIANT: In this state, the local endpoint is fully closed; that is,
+    /// both `local_write_closed` and `local_read_closed` are `true`.
     Closing,
+    /// Represents the state reached from `Connected` or `Closing` when the peer
+    /// fully shuts down the connection or resets it, or when a close timeout
+    /// expires in `Closing`.
+    ///
+    /// INVARIANT: In this state, the peer endpoint is fully closed; that is,
+    /// both `peer_write_closed` and `peer_read_closed` are `true`.
     Closed,
 }
 
@@ -149,6 +172,11 @@ impl Connection {
             }
         }
     }
+
+    pub(in crate::net::socket::vsock) fn test_and_clear_error(&self) -> Result<()> {
+        let mut state = self.inner.state.lock();
+        state.test_and_clear_error(&self.inner)
+    }
 }
 
 impl Connection {
@@ -159,11 +187,11 @@ impl Connection {
     ) -> Result<usize> {
         let mut packet_pool = [const { None }; 8];
 
-        let Some(mut packets) = self
-            .inner
-            .state
-            .lock()
-            .grab_packets_to_recv(&mut packet_pool[..], writer.sum_lens())?
+        let Some(mut packets) = self.inner.state.lock().grab_packets_to_recv(
+            &self.inner,
+            &mut packet_pool[..],
+            writer.sum_lens(),
+        )?
         else {
             return Ok(0);
         };
@@ -227,10 +255,11 @@ impl PoppedRxPackets<'_> {
 impl ConnectionState {
     fn grab_packets_to_recv<'a>(
         &mut self,
+        conn: &ConnectionInner,
         packet_pool: &'a mut [Option<RxPacket>],
         max_bytes: usize,
     ) -> Result<Option<PoppedRxPackets<'a>>> {
-        self.test_and_clear_error()?;
+        self.test_and_clear_error(conn)?;
 
         let Some(packets) = self.pop_rx_packets(&mut packet_pool[..], max_bytes) else {
             if self.shutdown.local_read_closed || self.shutdown.peer_write_closed {
@@ -247,7 +276,7 @@ impl ConnectionState {
         packet_pool: &'a mut [Option<RxPacket>],
         mut max_bytes: usize,
     ) -> Option<PoppedRxPackets<'a>> {
-        let mut read_offset = Some(0);
+        let mut read_offset = None;
         let mut num_packets = 0;
 
         for packet_opt in packet_pool.iter_mut() {
@@ -320,7 +349,7 @@ impl ConnectionState {
             return;
         }
 
-        self.send_packet(conn, VirtioVsockOp::CreditUpdate, 0);
+        let _ = self.send_packet(conn, VirtioVsockOp::CreditUpdate, 0);
     }
 }
 
@@ -355,7 +384,7 @@ impl Connection {
     ) -> Result<usize> {
         let mut state = self.inner.state.lock();
 
-        state.test_and_clear_error()?;
+        state.test_and_clear_error(&self.inner)?;
 
         if state.phase == Phase::Connecting {
             return_errno_with_message!(Errno::EAGAIN, "the connection is not established");
@@ -372,18 +401,15 @@ impl Connection {
         let credit_bytes = state.check_peer_credit(&self.inner)?;
         debug_assert_ne!(credit_bytes, 0);
 
-        let num_bytes = max_bytes.min(buffer_bytes).min(credit_bytes);
-        let mut remaining_bytes = num_bytes;
+        let max_bytes = max_bytes.min(buffer_bytes).min(credit_bytes);
+        let mut num_bytes = 0;
 
         for packet_opt in packet_pool.iter_mut() {
-            if remaining_bytes == 0 {
-                break;
-            }
-
             *packet_opt = Some(TxPacket::new_builder()?);
-            if remaining_bytes > TxPacketBuilder::MAX_NBYTES {
-                remaining_bytes -= TxPacketBuilder::MAX_NBYTES;
-            } else {
+
+            num_bytes += TxPacketBuilder::MAX_NBYTES;
+            if num_bytes >= max_bytes {
+                num_bytes = max_bytes;
                 break;
             }
         }
@@ -427,6 +453,7 @@ impl Connection {
         let mut tx = vsock_space.device().lock_tx();
 
         let mut num_bytes = 0;
+        let mut num_bytes_in_pending = 0;
 
         for packet_opt in packet_pool.iter_mut() {
             let Some(packet_builder) = packet_opt.take() else {
@@ -444,6 +471,8 @@ impl Connection {
                         bytes: nbytes,
                     };
                     pending.push_pending(Some(Box::new(completion)));
+
+                    num_bytes_in_pending += nbytes;
                 }
             }
 
@@ -453,8 +482,8 @@ impl Connection {
         let buffer_bytes = self
             .inner
             .available_tx_bytes
-            .fetch_sub(num_bytes, Ordering::Relaxed);
-        debug_assert!(buffer_bytes >= num_bytes);
+            .fetch_sub(num_bytes_in_pending, Ordering::Relaxed);
+        debug_assert!(buffer_bytes >= num_bytes_in_pending);
 
         state.consume_peer_credit(num_bytes);
 
@@ -470,8 +499,9 @@ impl ConnectionState {
             return Ok(peer_free);
         }
 
-        if !self.credit.credit_request_pending {
-            self.send_packet(conn, VirtioVsockOp::CreditRequest, 0);
+        if !self.credit.credit_request_pending
+            && self.send_packet(conn, VirtioVsockOp::CreditRequest, 0)
+        {
             self.credit.credit_request_pending = true;
         }
 
@@ -506,7 +536,7 @@ impl Drop for ReleasePendingBytes {
 }
 
 impl Connection {
-    pub(in crate::net::socket::vsock) fn shutdown(&mut self, cmd: SockShutdownCmd) -> Result<()> {
+    pub(in crate::net::socket::vsock) fn shutdown(&self, cmd: SockShutdownCmd) -> Result<()> {
         self.shutdown_or_drop_common(cmd, false);
         Ok(())
     }
@@ -538,11 +568,7 @@ impl Connection {
         if cmd.shut_write() && !state.shutdown.local_write_closed {
             state.shutdown.local_write_closed = true;
             shutdown_flags |= VirtioVsockShutdownFlags::SEND;
-            notify_events |= IoEvents::OUT | IoEvents::HUP;
-        }
-
-        if shutdown_flags.is_empty() {
-            return;
+            notify_events |= IoEvents::HUP;
         }
 
         let local_fully_closed =
@@ -550,7 +576,10 @@ impl Connection {
         let peer_fully_closed = state.shutdown.peer_read_closed && state.shutdown.peer_write_closed;
 
         if !local_fully_closed || !peer_fully_closed {
-            state.send_packet(&self.inner, VirtioVsockOp::Shutdown, shutdown_flags.bits());
+            if !shutdown_flags.is_empty() {
+                let _ =
+                    state.send_packet(&self.inner, VirtioVsockOp::Shutdown, shutdown_flags.bits());
+            }
 
             if on_drop {
                 debug_assert!(local_fully_closed);
@@ -559,16 +588,18 @@ impl Connection {
             }
 
             drop(state);
-        } else {
+        } else if state.phase != Phase::Closed {
             state.phase = Phase::Closed;
-            state.send_packet(&self.inner, VirtioVsockOp::Rst, 0);
+            let _ = state.send_packet(&self.inner, VirtioVsockOp::Rst, 0);
             drop(state);
 
             let vsock_space = self.inner.bound_port.vsock_space();
             vsock_space.remove_connection(&self.inner);
         }
 
-        self.inner.pollee.notify(notify_events);
+        if !on_drop {
+            self.inner.pollee.notify(notify_events);
+        }
     }
 }
 
@@ -577,28 +608,41 @@ impl Connection {
         let state = self.inner.state.lock();
         let mut events = IoEvents::empty();
 
+        let local_fully_closed =
+            state.shutdown.local_read_closed && state.shutdown.local_write_closed;
+        let peer_fully_closed = state.shutdown.peer_read_closed && state.shutdown.peer_write_closed;
+
         if !state.rx_queue.packets.is_empty() {
             events |= IoEvents::IN;
         }
-        if state.phase == Phase::Connected
-            && state.peer_credit() != 0
-            && self.inner.available_tx_bytes.load(Ordering::Relaxed) != 0
+
+        if state.shutdown.peer_write_closed || state.shutdown.local_read_closed {
+            events |= IoEvents::IN | IoEvents::RDHUP;
+        }
+
+        // Most sockets tend to report EPOLLOUT once the write side has been shut down. However,
+        // the logic for vsock appears to be different.
+        if !state.shutdown.local_write_closed {
+            if state.phase == Phase::Connected
+                && state.peer_credit() != 0
+                && self.inner.available_tx_bytes.load(Ordering::Relaxed) != 0
+            {
+                events |= IoEvents::OUT;
+            }
+
+            if peer_fully_closed {
+                events |= IoEvents::OUT;
+            }
+        }
+
+        if local_fully_closed
+            || (state.shutdown.peer_write_closed && state.shutdown.local_write_closed)
         {
-            events |= IoEvents::OUT;
+            events |= IoEvents::HUP;
         }
 
         if state.error.is_some() {
             events |= IoEvents::ERR;
-        }
-
-        if state.shutdown.peer_read_closed || state.shutdown.local_write_closed {
-            events |= IoEvents::OUT;
-        }
-        if state.shutdown.peer_write_closed || state.shutdown.local_read_closed {
-            events |= IoEvents::RDHUP | IoEvents::IN;
-            if state.shutdown.peer_read_closed || state.shutdown.local_write_closed {
-                events |= IoEvents::HUP;
-            }
         }
 
         events
@@ -610,15 +654,17 @@ impl Connection {
 }
 
 impl ConnectionState {
-    fn test_and_clear_error(&mut self) -> Result<()> {
+    fn test_and_clear_error(&mut self, conn: &ConnectionInner) -> Result<()> {
         if let Some(error) = self.error.take() {
+            conn.pollee.invalidate();
             return Err(error);
         }
 
         Ok(())
     }
 
-    fn send_packet(&mut self, conn: &ConnectionInner, op: VirtioVsockOp, flags: u32) {
+    #[must_use]
+    fn send_packet(&mut self, conn: &ConnectionInner, op: VirtioVsockOp, flags: u32) -> bool {
         let header = VirtioVsockHdr::new(
             conn.conn_id.local_cid,
             conn.conn_id.peer_cid,
@@ -630,9 +676,13 @@ impl ConnectionState {
             DEFAULT_RX_BUF_SIZE as u32,
             self.credit.local_fwd_cnt,
         );
-        self.credit.last_reported_fwd_cnt = self.credit.local_fwd_cnt;
 
-        conn.bound_port.vsock_space().send_packet(&header);
+        if conn.bound_port.vsock_space().send_packet(&header) {
+            self.credit.last_reported_fwd_cnt = self.credit.local_fwd_cnt;
+            true
+        } else {
+            false
+        }
     }
 
     fn make_tx_packet(
@@ -708,21 +758,28 @@ impl ConnectionInner {
         conn_id: &ConnId,
         pollee: Pollee,
     ) -> Arc<Self> {
+        pollee.invalidate();
+
         let this = Self::new(bound_port, conn_id, pollee, Phase::Connecting);
 
         let mut state = this.state.lock();
-        state.send_packet(&this, VirtioVsockOp::Request, 0);
+        let _ = state.send_packet(&this, VirtioVsockOp::Request, 0);
         state.arm_timeout(&this, DEFAULT_CONNECT_TIMEOUT);
         drop(state);
 
         this
     }
 
-    pub(super) fn new_connected(bound_port: BoundPort, conn_id: &ConnId) -> Arc<Self> {
+    pub(super) fn new_connected(
+        bound_port: BoundPort,
+        conn_id: &ConnId,
+        header: &VirtioVsockHdr,
+    ) -> Arc<Self> {
         let this = Self::new(bound_port, conn_id, Pollee::new(), Phase::Connected);
 
         let mut state = this.state.lock();
-        state.send_packet(&this, VirtioVsockOp::Response, 0);
+        state.update_peer_credit(&this, header);
+        let _ = state.send_packet(&this, VirtioVsockOp::Response, 0);
         drop(state);
 
         this
@@ -786,8 +843,6 @@ impl ConnectionInner {
         state.phase = Phase::Connected;
         state.timer = None;
 
-        state.send_packet(self, VirtioVsockOp::Response, 0);
-
         drop(state);
         self.pollee.notify(IoEvents::OUT);
 
@@ -806,14 +861,19 @@ impl ConnectionInner {
         let mut state = self.state.lock();
         let mut notify_events = IoEvents::empty();
 
+        if state.phase == Phase::Connecting {
+            state.active_rst(self);
+            return true;
+        }
+
         let flags = VirtioVsockShutdownFlags::from_bits_truncate(header.flags());
         if flags.contains(VirtioVsockShutdownFlags::SEND) && !state.shutdown.peer_write_closed {
             state.shutdown.peer_write_closed = true;
-            notify_events |= IoEvents::IN | IoEvents::RDHUP | IoEvents::HUP;
+            notify_events |= IoEvents::IN | IoEvents::OUT | IoEvents::RDHUP | IoEvents::HUP;
         }
         if flags.contains(VirtioVsockShutdownFlags::RECEIVE) && !state.shutdown.peer_read_closed {
             state.shutdown.peer_read_closed = true;
-            notify_events |= IoEvents::OUT | IoEvents::HUP;
+            notify_events |= IoEvents::OUT;
         }
 
         if notify_events.is_empty() {
@@ -823,7 +883,7 @@ impl ConnectionInner {
         let peer_fully_closed = state.shutdown.peer_read_closed && state.shutdown.peer_write_closed;
         let should_remove = if peer_fully_closed && state.phase == Phase::Closing {
             state.phase = Phase::Closed;
-            state.send_packet(self, VirtioVsockOp::Rst, 0);
+            let _ = state.send_packet(self, VirtioVsockOp::Rst, 0);
             true
         } else {
             false
@@ -838,8 +898,13 @@ impl ConnectionInner {
     pub(super) fn on_rw(&self, header: &VirtioVsockHdr, packet: RxPacket) -> Result<()> {
         let mut state = self.state.lock();
 
+        if state.phase == Phase::Connecting {
+            state.active_rst(self);
+            return_errno_with_message!(Errno::ENOTCONN, "the connection is not established");
+        }
+
         let len = packet.payload_len();
-        if state.rx_queue.used_bytes + len - state.rx_queue.read_offset > DEFAULT_RX_BUF_SIZE {
+        if state.rx_queue.used_bytes + len > DEFAULT_RX_BUF_SIZE {
             state.active_rst(self);
             return_errno_with_message!(Errno::ENOMEM, "the receive queue is full");
         }
@@ -855,20 +920,34 @@ impl ConnectionInner {
         Ok(())
     }
 
-    pub(super) fn on_credit_update(&self, header: &VirtioVsockHdr) {
+    pub(super) fn on_credit_update(&self, header: &VirtioVsockHdr) -> Result<()> {
         let mut state = self.state.lock();
+
+        if state.phase == Phase::Connecting {
+            state.active_rst(self);
+            return_errno_with_message!(Errno::ENOTCONN, "the connection is not established");
+        }
 
         state.update_peer_credit(self, header);
 
         state.credit.credit_request_pending = false;
+
+        Ok(())
     }
 
-    pub(super) fn on_credit_request(&self, header: &VirtioVsockHdr) {
+    pub(super) fn on_credit_request(&self, header: &VirtioVsockHdr) -> Result<()> {
         let mut state = self.state.lock();
+
+        if state.phase == Phase::Connecting {
+            state.active_rst(self);
+            return_errno_with_message!(Errno::ENOTCONN, "the connection is not established");
+        }
 
         state.update_peer_credit(self, header);
 
-        state.send_packet(self, VirtioVsockOp::CreditUpdate, 0);
+        let _ = state.send_packet(self, VirtioVsockOp::CreditUpdate, 0);
+
+        Ok(())
     }
 
     pub(super) fn on_timeout(&self, generation: u64) -> bool {
@@ -892,11 +971,15 @@ impl ConnectionInner {
                 Errno::ETIMEDOUT,
                 "the connection timed out",
             ));
+            state.shutdown.peer_read_closed = true;
+            state.shutdown.peer_write_closed = true;
             return true;
         }
 
         if state.phase == Phase::Closing {
             state.phase = Phase::Closed;
+            state.shutdown.peer_read_closed = true;
+            state.shutdown.peer_write_closed = true;
             return true;
         }
 
@@ -913,7 +996,7 @@ impl ConnectionInner {
 impl ConnectionState {
     fn active_rst(&mut self, conn: &ConnectionInner) {
         if self.do_rst() {
-            self.send_packet(conn, VirtioVsockOp::Rst, 0);
+            let _ = self.send_packet(conn, VirtioVsockOp::Rst, 0);
         }
 
         // The caller will notify the pollee _after_ removing the connection from the table.
@@ -924,11 +1007,11 @@ impl ConnectionState {
             Phase::Connecting => {
                 self.phase = Phase::ConnectFailed;
                 self.error = Some(Error::with_message(
-                    Errno::ECONNREFUSED,
+                    Errno::ECONNRESET,
                     "the connection is refused",
                 ));
-                self.shutdown.local_read_closed = true;
-                self.shutdown.local_write_closed = true;
+                self.shutdown.peer_read_closed = true;
+                self.shutdown.peer_write_closed = true;
                 self.timer = None;
 
                 true
@@ -939,13 +1022,15 @@ impl ConnectionState {
                     Errno::ECONNRESET,
                     "the connection is reset",
                 ));
-                self.shutdown.local_read_closed = true;
-                self.shutdown.local_write_closed = true;
+                self.shutdown.peer_read_closed = true;
+                self.shutdown.peer_write_closed = true;
 
                 true
             }
             Phase::Closing => {
                 self.phase = Phase::Closed;
+                self.shutdown.peer_read_closed = true;
+                self.shutdown.peer_write_closed = true;
                 self.timer = None;
 
                 true
@@ -958,7 +1043,7 @@ impl ConnectionState {
     fn update_peer_credit(&mut self, conn: &ConnectionInner, header: &VirtioVsockHdr) {
         let mut should_notify = false;
 
-        should_notify |= self.credit.peer_buf_alloc < header.buf_alloc();
+        should_notify |= self.credit.peer_buf_alloc != header.buf_alloc();
         self.credit.peer_buf_alloc = header.buf_alloc();
 
         should_notify |= self.credit.peer_fwd_cnt != header.fwd_cnt();

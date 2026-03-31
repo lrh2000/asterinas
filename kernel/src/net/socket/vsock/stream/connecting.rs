@@ -36,10 +36,6 @@ impl ConnectingStream {
         self.connection.local_addr()
     }
 
-    pub(super) fn remote_addr(&self) -> VsockSocketAddr {
-        self.connection.remote_addr()
-    }
-
     pub(super) fn has_result(&self) -> bool {
         self.connection.has_connect_result()
     }
