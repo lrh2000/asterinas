@@ -79,13 +79,13 @@ impl<H: Pod> TxBufferBuilder<H> {
 
         let bytes_written = f(writer)?;
         self.nbytes += bytes_written;
-        debug_assert!(self.nbytes < self.segment.size());
+        debug_assert!(self.nbytes <= self.segment.size());
 
         Ok(bytes_written)
     }
 
-    pub fn nbytes(&self) -> usize {
-        self.nbytes
+    pub const fn packet_len(&self) -> usize {
+        self.nbytes - size_of::<H>()
     }
 
     pub fn build(self, header: &H) -> TxBuffer {

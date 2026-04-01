@@ -39,8 +39,8 @@ impl TxPacketBuilder {
         self.0.append(f)
     }
 
-    pub fn nbytes(&self) -> usize {
-        self.0.nbytes()
+    pub fn payload_len(&self) -> usize {
+        self.0.packet_len()
     }
 
     pub fn build(self, header: &VirtioVsockHdr) -> TxPacket {

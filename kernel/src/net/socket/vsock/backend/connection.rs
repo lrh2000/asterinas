@@ -465,7 +465,7 @@ impl Connection {
                 break;
             };
 
-            let nbytes = packet_builder.nbytes();
+            let nbytes = packet_builder.payload_len();
             let packet = state.make_tx_packet(&self.inner, packet_builder);
 
             match tx.try_send(packet) {
@@ -707,7 +707,7 @@ impl ConnectionState {
             conn.conn_id.peer_cid,
             conn.conn_id.local_port,
             conn.conn_id.peer_port,
-            packet_builder.nbytes() as u32,
+            packet_builder.payload_len() as u32,
             VirtioVsockOp::Rw,
             0,
             DEFAULT_RX_BUF_SIZE as u32,
