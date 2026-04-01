@@ -168,7 +168,7 @@ impl VsockStreamSocket {
         let mut state = self.lock_updated_state();
 
         match state.as_mut() {
-            State::Init(init_stream) => init_stream.try_recv().map(|(len, _)| len),
+            State::Init(init_stream) => init_stream.try_recv(),
             State::Connecting(_) => {
                 return_errno_with_message!(Errno::ENOTCONN, "the socket is connecting");
             }

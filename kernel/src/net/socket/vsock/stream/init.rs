@@ -2,13 +2,10 @@
 
 use crate::{
     events::IoEvents,
-    net::socket::{
-        util::SocketAddr,
-        vsock::{
-            addr::{UNSPECIFIED_VSOCK_ADDR, VMADDR_CID_HOST, VMADDR_PORT_ANY, VsockSocketAddr},
-            backend::BoundPort,
-            stream::{ConnectingStream, ListenStream},
-        },
+    net::socket::vsock::{
+        addr::{VMADDR_CID_HOST, VMADDR_PORT_ANY, VsockSocketAddr},
+        backend::BoundPort,
+        stream::{ConnectingStream, ListenStream},
     },
     prelude::*,
     process::signal::Pollee,
@@ -127,16 +124,12 @@ impl InitStream {
             .map_err(|(error, bound_port)| (error, Self::new_bound(bound_port)))
     }
 
-    pub(super) fn try_recv(&mut self) -> Result<(usize, SocketAddr)> {
-        if self.is_connect_done {
-            return_errno_with_message!(Errno::ENOTCONN, "the socket is not connected");
-        }
-
+    pub(super) fn try_recv(&mut self) -> Result<usize> {
         if let Some(error) = self.last_connect_error.take() {
             return Err(error);
         }
 
-        Ok((0, UNSPECIFIED_VSOCK_ADDR.into()))
+        return_errno_with_message!(Errno::ENOTCONN, "the socket is not connected")
     }
 
     pub(super) fn try_send(&mut self) -> Result<usize> {
@@ -144,7 +137,7 @@ impl InitStream {
             return Err(error);
         }
 
-        return_errno_with_message!(Errno::EPIPE, "the socket is not connected")
+        return_errno_with_message!(Errno::ENOTCONN, "the socket is not connected")
     }
 
     pub(super) fn local_addr(&self) -> Option<VsockSocketAddr> {

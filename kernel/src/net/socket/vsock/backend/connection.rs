@@ -60,28 +60,33 @@ struct ConnectionState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Phase {
     /// Represents the initial state of a newly created connection.
-    Connecting,
-    /// Represents the state reached from `Connecting` when the connection
-    /// request is rejected or times out.
     ///
     /// INVARIANT: In this state, the peer endpoint is fully closed; that is,
     /// both `peer_write_closed` and `peer_read_closed` are `true`.
+    Connecting,
+
+    /// Represents the state reached from `Connecting` when the connection
+    /// request is rejected or times out.
+    ///
+    /// INVARIANT: In this state, the peer endpoint is fully closed.
     ConnectFailed,
+
     /// Represents the initial state of an accepted connection, or the state
     /// reached from `Connecting` when the connection request succeeds.
     Connected,
+
     /// Represents the state reached from `Connected` when the socket is closed
     /// locally, but the peer has not reset the connection.
     ///
     /// INVARIANT: In this state, the local endpoint is fully closed; that is,
     /// both `local_write_closed` and `local_read_closed` are `true`.
     Closing,
+
     /// Represents the state reached from `Connected` or `Closing` when the peer
     /// fully shuts down the connection or resets it, or when a close timeout
     /// expires in `Closing`.
     ///
-    /// INVARIANT: In this state, the peer endpoint is fully closed; that is,
-    /// both `peer_write_closed` and `peer_read_closed` are `true`.
+    /// INVARIANT: In this state, the peer endpoint is fully closed.
     Closed,
 }
 
@@ -259,9 +264,9 @@ impl ConnectionState {
         packet_pool: &'a mut [Option<RxPacket>],
         max_bytes: usize,
     ) -> Result<Option<PoppedRxPackets<'a>>> {
-        self.test_and_clear_error(conn)?;
-
         let Some(packets) = self.pop_rx_packets(&mut packet_pool[..], max_bytes) else {
+            self.test_and_clear_error(conn)?;
+
             if self.shutdown.local_read_closed || self.shutdown.peer_write_closed {
                 return Ok(None);
             }
@@ -368,6 +373,9 @@ impl Connection {
 
         let num_bytes = self.alloc_send_buffers(&mut packet_pool[..], max_bytes)?;
 
+        // TODO: If the user sends too many small packets, we'll exhaust a large amount of kernel
+        // memory. We need to support merging small packets to avoid this.
+
         Self::copy_to_send_buffers(&mut packet_pool[..], reader, num_bytes)?;
 
         self.build_and_send_tx_packets(&mut packet_pool[..])?;
@@ -386,9 +394,6 @@ impl Connection {
 
         state.test_and_clear_error(&self.inner)?;
 
-        if state.phase == Phase::Connecting {
-            return_errno_with_message!(Errno::EAGAIN, "the connection is not established");
-        }
         if state.shutdown.local_write_closed || state.shutdown.peer_read_closed {
             return_errno_with_message!(Errno::EPIPE, "the connection is closed for writing");
         }
@@ -605,6 +610,14 @@ impl Connection {
 
 impl Connection {
     pub(in crate::net::socket::vsock) fn check_io_events(&self) -> IoEvents {
+        // The socket layer handles the `Connecting` and `ConnectFailed` phases. The `Closing`
+        // phase indicates that the socket file has been closed. None of them will reach this
+        // method.
+        //
+        // This method only needs to work for the `Connected` and `Closed` phases. Most of the
+        // logic below is not very intuitive, but it aims to mimic Linux behavior as much as
+        // possible.
+
         let state = self.inner.state.lock();
         let mut events = IoEvents::empty();
 
@@ -623,8 +636,7 @@ impl Connection {
         // Most sockets tend to report EPOLLOUT once the write side has been shut down. However,
         // the logic for vsock appears to be different.
         if !state.shutdown.local_write_closed {
-            if state.phase == Phase::Connected
-                && state.peer_credit() != 0
+            if state.peer_credit() != 0
                 && self.inner.available_tx_bytes.load(Ordering::Relaxed) != 0
             {
                 events |= IoEvents::OUT;
@@ -788,6 +800,8 @@ impl ConnectionInner {
     fn new(bound_port: BoundPort, conn_id: &ConnId, pollee: Pollee, phase: Phase) -> Arc<Self> {
         debug_assert_eq!(bound_port.port(), conn_id.local_port);
 
+        let peer_fully_closed = phase != Phase::Connected;
+
         let state = ConnectionState {
             phase,
             error: None,
@@ -807,8 +821,8 @@ impl ConnectionInner {
             shutdown: ShutdownState {
                 local_read_closed: false,
                 local_write_closed: false,
-                peer_read_closed: false,
-                peer_write_closed: false,
+                peer_read_closed: peer_fully_closed,
+                peer_write_closed: peer_fully_closed,
             },
             timer: None,
         };
@@ -841,6 +855,8 @@ impl ConnectionInner {
         state.update_peer_credit(self, header);
 
         state.phase = Phase::Connected;
+        state.shutdown.peer_read_closed = false;
+        state.shutdown.peer_write_closed = false;
         state.timer = None;
 
         drop(state);
@@ -880,8 +896,11 @@ impl ConnectionInner {
             return false;
         }
 
+        let local_fully_closed =
+            state.shutdown.local_read_closed && state.shutdown.local_write_closed;
         let peer_fully_closed = state.shutdown.peer_read_closed && state.shutdown.peer_write_closed;
-        let should_remove = if peer_fully_closed && state.phase == Phase::Closing {
+
+        let should_remove = if local_fully_closed && peer_fully_closed {
             state.phase = Phase::Closed;
             let _ = state.send_packet(self, VirtioVsockOp::Rst, 0);
             true
@@ -898,7 +917,9 @@ impl ConnectionInner {
     pub(super) fn on_rw(&self, header: &VirtioVsockHdr, packet: RxPacket) -> Result<()> {
         let mut state = self.state.lock();
 
-        if state.phase == Phase::Connecting {
+        if state.shutdown.peer_write_closed {
+            // We don't check `local_read_closed` because the peer cannot immediately know this
+            // information.
             state.active_rst(self);
             return_errno_with_message!(Errno::ENOTCONN, "the connection is not established");
         }
@@ -911,8 +932,13 @@ impl ConnectionInner {
 
         state.update_peer_credit(self, header);
 
-        state.rx_queue.used_bytes += len;
-        state.rx_queue.packets.push_back(packet);
+        if len != 0 {
+            state.rx_queue.used_bytes += len;
+            state.rx_queue.packets.push_back(packet);
+        }
+
+        // TODO: If the peer sends too many small packets, we'll exhaust a large amount of kernel
+        // memory. We need to support merging small packets to avoid this.
 
         drop(state);
         self.pollee.notify(IoEvents::IN);
@@ -960,30 +986,18 @@ impl ConnectionInner {
             return false;
         }
 
-        state.timer = None;
+        state.active_rst(self);
 
-        // If this method returns true, the caller will notify the pollee _after_ removing the
-        // connection from the table.
-
-        if state.phase == Phase::Connecting {
-            state.phase = Phase::ConnectFailed;
+        // If the connection resets before this method is reached, the timer will already be set to
+        // `None`, so we won't get here. Therefore, we know that the connection timed out.
+        if state.phase == Phase::ConnectFailed {
             state.error = Some(Error::with_message(
                 Errno::ETIMEDOUT,
                 "the connection timed out",
             ));
-            state.shutdown.peer_read_closed = true;
-            state.shutdown.peer_write_closed = true;
-            return true;
         }
 
-        if state.phase == Phase::Closing {
-            state.phase = Phase::Closed;
-            state.shutdown.peer_read_closed = true;
-            state.shutdown.peer_write_closed = true;
-            return true;
-        }
-
-        false
+        true
     }
 
     pub(super) fn active_rst(&self) {
@@ -1010,8 +1024,6 @@ impl ConnectionState {
                     Errno::ECONNRESET,
                     "the connection is refused",
                 ));
-                self.shutdown.peer_read_closed = true;
-                self.shutdown.peer_write_closed = true;
                 self.timer = None;
 
                 true

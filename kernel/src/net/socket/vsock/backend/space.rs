@@ -295,7 +295,8 @@ impl VsockSpace {
 
         let connections = core::mem::take(&mut sockets.connections);
         for connection in connections.into_values() {
-            Self::reset_removed_connection(connection);
+            connection.on_rst();
+            Self::notify_removed_connection(connection);
         }
 
         // The reload of the guest CID is protectd by the `sockets` lock.
@@ -326,6 +327,13 @@ impl VsockSpace {
     }
 
     fn notify_removed_connection(connection: Arc<ConnectionInner>) {
+        // A reset connection may still be in the listener's accept queue. This is a deliberate
+        // design choice, as we currently lack the means to efficiently locate the listener. This
+        // should be harmless to the user space because a connection can always be reset just after
+        // being accepted.
+        //
+        // FIXME: This may not be consistent with Linux behavior.
+
         let pollee = connection.pollee().clone();
         drop(connection);
 
