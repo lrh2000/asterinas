@@ -48,7 +48,7 @@ ifneq ($(SUBDIRS_FILTER),)
 endif
 
 .PHONY: all
-all: $(C_OBJS) $(ASM_OBJS) $(SUBDIRS) $(SCRIPTS)
+all: $(C_OBJS) $(ASM_OBJS) $(SUBDIRS) $(SCRIPTS) $(EXTRA_TARGETS)
 
 $(OBJ_OUTPUT_DIR) $(DEP_OUTPUT_DIR):
 	@mkdir -p $@

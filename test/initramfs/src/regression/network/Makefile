@@ -4,5 +4,6 @@ EXTRA_C_FLAGS := -I/usr/include/libnl3 -lnl-3 -lnl-route-3
 
 SUBDIRS := \
 	vsock \
+	vsock_common \
 
 include ../common/Makefile
