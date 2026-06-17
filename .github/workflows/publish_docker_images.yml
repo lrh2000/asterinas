@@ -6,7 +6,7 @@ on:
     paths:
       - DOCKER_IMAGE_VERSION
     branches:
-      - main
+      - ext2-vmo-ci
 
 permissions:
   contents: read

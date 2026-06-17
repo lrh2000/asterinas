@@ -12,7 +12,7 @@ on:
   # Events for API docs of new release
   push:
     branches:
-      - main
+      - ext2-vmo-ci
     paths:
       - VERSION
   

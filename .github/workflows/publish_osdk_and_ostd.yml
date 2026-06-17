@@ -9,7 +9,7 @@ on:
       - osdk/**
   push:
     branches:
-      - main
+      - ext2-vmo-ci
     paths: 
       - VERSION
 

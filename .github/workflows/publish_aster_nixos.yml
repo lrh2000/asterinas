@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   push:
     branches:
-      - main
+      - ext2-vmo-ci
     paths:
       - VERSION
       - test/nixos/common/merge_nixos_config.sh

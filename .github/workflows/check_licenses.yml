@@ -3,7 +3,7 @@ on:
   pull_request:
   push:
     branches: 
-      - main
+      - ext2-vmo-ci
 jobs:
   check-license-lines:
     runs-on: ubuntu-latest

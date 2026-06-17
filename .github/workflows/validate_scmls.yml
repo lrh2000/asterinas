@@ -9,7 +9,7 @@ on:
       - .github/workflows/validate_scmls.yml
   push:
     branches:
-      - main
+      - ext2-vmo-ci
     paths:
       - tools/sctrace/**
       - book/src/kernel/linux-compatibility/syscall-flag-coverage/**

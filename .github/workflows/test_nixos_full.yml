@@ -31,7 +31,7 @@ on:
       - test/nixos/tests/**
   push:
     branches:
-      - main
+      - ext2-vmo-ci
     paths: *triggering_paths
 
 concurrency:

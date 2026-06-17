@@ -9,7 +9,7 @@ on:
       - test/nixos/common/merge_nixos_config.sh
   push:
     branches:
-      - main
+      - ext2-vmo-ci
     paths:
       - .github/workflows/push_cachix_pkgs.yml
       - distro/**

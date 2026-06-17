@@ -9,7 +9,7 @@ on:
       - tools/nixos/**
   push:
     branches:
-      - main
+      - ext2-vmo-ci
     paths:
       - distro/**
       - .github/workflows/test_iso_image.yml

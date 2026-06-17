@@ -10,7 +10,7 @@ on:
   pull_request:
   push:
     branches:
-      - main
+      - ext2-vmo-ci
 
 jobs:
   minimal-nixos-test:
