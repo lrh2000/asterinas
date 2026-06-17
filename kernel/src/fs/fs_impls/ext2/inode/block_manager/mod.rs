@@ -99,9 +99,14 @@ impl InodeBlockManager {
     }
 
     /// Allocates missing data blocks that cover the requested logical block range.
-    pub(super) fn allocate_range_blocks(&self, start_block: usize, end_block: usize) -> Result<()> {
+    pub(super) fn allocate_range_blocks(
+        &self,
+        start_block: usize,
+        end_block: usize,
+    ) -> Result<Vec<Range<Ext2Bid>>> {
         let fs = self.fs()?;
         let mut tree = self.block_ptr_tree.write();
+        let mut new_blocks = Vec::new();
         let mut current_block = start_block;
         while current_block < end_block {
             let iblock = Iblock::try_from(current_block)
@@ -118,10 +123,11 @@ impl InodeBlockManager {
                 ResolvedBlockRange::NewlyAllocated(range) => {
                     debug_assert!(!range.is_empty());
                     current_block += range.len();
+                    new_blocks.push(range);
                 }
             }
         }
-        Ok(())
+        Ok(new_blocks)
     }
 
     /// Updates the cached page-cache capacity bound.

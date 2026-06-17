@@ -3,7 +3,6 @@
 //! Logical-to-physical block translation via the ext2 block-pointer tree.
 
 use device_id::{decode_device_numbers, encode_device_numbers};
-use ostd::mm::io::util::HasVmReaderWriter;
 use smallvec::SmallVec;
 
 use super::indirect_block_manager::{IndirectBlock, IndirectBlockManager};
@@ -679,25 +678,10 @@ impl BlockPtrTree {
         let data_blocks_range = fs.alloc_blocks(data_blks, alloc_goal)?;
         debug_assert!(data_blocks_range.end >= data_blocks_range.start);
         let allocated_count = data_blocks_range.end - data_blocks_range.start;
-        guard.track_data_blocks(data_blocks_range.clone());
+        guard.track_data_blocks(data_blocks_range);
         debug_assert!(allocated_count > 0 && allocated_count <= data_blks);
 
-        Self::zero_new_blocks(fs, &data_blocks_range)?;
-
         Ok(guard)
-    }
-
-    /// Zeroes newly allocated data blocks before exposing them via mapped reads.
-    fn zero_new_blocks(fs: &Ext2, block_range: &Range<Ext2Bid>) -> Result<()> {
-        let mut io_batch = IoBatch::with_capacity(1);
-
-        let bio_segment = BioSegment::alloc(block_range.len(), BioDirection::ToDevice);
-        let mut segment_writer = bio_segment.writer().unwrap();
-        segment_writer.fill_zeros(block_range.len() * BLOCK_SIZE);
-        fs.write_blocks_async(block_range.start, bio_segment, None, &mut io_batch)?;
-
-        io_batch.wait_all()?;
-        Ok(())
     }
 
     /// Splices allocated blocks into the block-pointer tree.
