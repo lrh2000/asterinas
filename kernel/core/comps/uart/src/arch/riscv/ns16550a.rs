@@ -59,7 +59,15 @@ pub(super) fn init(fdt_node: FdtNode) {
         ostd::info!("Failed to read 'interrupt-parent' property from NS16550A node");
         return;
     };
-    let Some(intr) = fdt_node.interrupts().and_then(|mut intrs| intrs.next()) else {
+    let intr_args = if let Some(prop) = fdt_node.property("interrupts")
+        && let Ok(args) = prop
+            .value
+            .chunks_exact(size_of::<u32>())
+            .map(|chunk| u32::from_be_bytes(chunk.try_into().unwrap()))
+            .next_chunk()
+    {
+        args
+    } else {
         ostd::info!("Failed to read 'interrupts' property from NS16550A node");
         return;
     };
@@ -68,7 +76,7 @@ pub(super) fn init(fdt_node: FdtNode) {
         IRQ_CHIP.get().unwrap().map_fdt_pin_to(
             InterruptSourceInFdt {
                 interrupt_parent: intr_parent as u32,
-                interrupt: intr as u32,
+                arguments: intr_args,
             },
             irq_line,
         )
