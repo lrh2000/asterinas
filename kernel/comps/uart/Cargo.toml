@@ -16,5 +16,8 @@ spin.workspace = true
 fdt.workspace = true
 fdt-util.workspace = true
 
+[target.aarch64-unknown-none-softfloat.dependencies]
+fdt-util.workspace = true
+
 [lints]
 workspace = true

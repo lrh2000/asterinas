@@ -1,17 +1,30 @@
 // SPDX-License-Identifier: MPL-2.0
 
+use fdt_util::AcquireIrqLines;
 use ostd::{
-    arch::serial::{Pl011Uart, SERIAL_PORT},
+    arch::{
+        irq::MappedIrqLine,
+        serial::{Pl011Uart, SERIAL_PORT},
+    },
     sync::{LocalIrqDisabled, SpinLock},
 };
+use spin::Once;
 
 use crate::{
     alloc::string::ToString,
     console::{Uart, UartConsole},
 };
 
+/// IRQ line for UART serial.
+static IRQ_LINE: Once<MappedIrqLine> = Once::new();
+
 pub(super) fn init() {
     let Some(uart) = SERIAL_PORT.get() else {
+        return;
+    };
+
+    let node = uart.lock().fdt_node();
+    let Some([mut irq_line]) = node.acquire_irq_lines() else {
         return;
     };
 
@@ -22,10 +35,10 @@ pub(super) fn init() {
         uart_console.clone(),
     );
 
-    // TODO: Set up the IRQ line and handle the received data.
-    // Suppress the dead code warnings of the related methods.
-    let _ = || uart_console.trigger_input_callbacks();
-    let _ = || uart.flush();
+    irq_line.on_active(move |_| uart_console.trigger_input_callbacks());
+    IRQ_LINE.call_once(move || irq_line);
+    uart.lock().enable_recv_interrupt();
+    uart.flush();
 
     ostd::info!("Registered PL011 as a console");
 }
@@ -44,12 +57,22 @@ impl Uart for &'static SpinLock<Pl011Uart, LocalIrqDisabled> {
         }
     }
 
-    fn recv(&self, _buf: &mut [u8]) -> usize {
-        // TODO: Set up the IRQ line and handle the received data.
-        0
+    fn recv(&self, buf: &mut [u8]) -> usize {
+        let mut uart = self.lock();
+
+        for (i, byte) in buf.iter_mut().enumerate() {
+            let Some(recv_byte) = uart.recv() else {
+                return i;
+            };
+            *byte = recv_byte;
+        }
+
+        buf.len()
     }
 
     fn flush(&self) {
-        // TODO: Set up the IRQ line and flush the received data.
+        let mut uart = self.lock();
+
+        while uart.recv().is_some() {}
     }
 }
