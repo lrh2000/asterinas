@@ -10,28 +10,16 @@ pub struct RtcLoongson {
 
 impl Driver for RtcLoongson {
     fn try_new() -> Option<Self> {
-        let chosen = DEVICE_TREE.get().unwrap().find_node("/rtc").unwrap();
-        if let Some(compatible) = chosen.compatible()
-            && compatible.all().any(|c| c == "loongson,ls7a-rtc")
-        {
-            let region = chosen.reg().unwrap().next().unwrap();
-            let io_mem = IoMem::acquire(
-                region.starting_address as usize
-                    ..region.starting_address as usize + region.size.unwrap(),
-            )
-            .unwrap();
+        let io_mem = super::device_tree::probe_from_device_tree(&["loongson,ls7a-rtc"])?;
 
-            const SYS_RTCCTRL: usize = 0x40;
-            const SYS_TOYTRIM: usize = 0x20;
-            // Initialize the RTC unit
-            // Reference: <https://loongson.github.io/LoongArch-Documentation/Loongson-7A1000-usermanual-EN.html#rtc>
-            io_mem.write_once(SYS_TOYTRIM, &0x0u32).unwrap();
-            io_mem.write_once(SYS_RTCCTRL, &0x2900u32).unwrap();
+        const SYS_RTCCTRL: usize = 0x40;
+        const SYS_TOYTRIM: usize = 0x20;
+        // Initialize the RTC unit
+        // Reference: <https://loongson.github.io/LoongArch-Documentation/Loongson-7A1000-usermanual-EN.html#rtc>
+        io_mem.write_once(SYS_TOYTRIM, &0x0u32).unwrap();
+        io_mem.write_once(SYS_RTCCTRL, &0x2900u32).unwrap();
 
-            Some(Self { io_mem })
-        } else {
-            None
-        }
+        Some(Self { io_mem })
     }
 
     fn read_rtc(&self) -> SystemTime {
