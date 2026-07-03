@@ -23,16 +23,23 @@ pub(super) fn probe_from_device_tree() {
         let mmio_end = mmio_start + mmio_region.size.unwrap();
 
         let interrupt_source_in_fdt = InterruptSourceInFdt {
-            interrupt_parent: node
-                .property("interrupt-parent")
-                .and_then(|prop| prop.as_usize())
+            // FIXME: We need to find the "interrupt-parent" property for the nearest ancestor.
+            // However, there are no APIs to iterate ancestors. This workaround is for such device
+            // trees (e.g., the ARM "virt" platform in QEMU).
+            interrupt_parent: [node, device_tree.find_node("/").unwrap()]
+                .iter()
+                .find_map(|n| n.property("interrupt-parent"))
+                .unwrap()
+                .as_usize()
                 .unwrap() as u32,
             arguments: node
                 .property("interrupts")
                 .unwrap()
                 .value
-                .chunks_exact(size_of::<u32>())
-                .map(|chunk| u32::from_be_bytes(chunk.try_into().unwrap()))
+                .as_chunks::<{ size_of::<u32>() }>()
+                .0
+                .iter()
+                .map(|chunk| u32::from_be_bytes(*chunk))
                 .next_chunk()
                 .unwrap(),
         };
