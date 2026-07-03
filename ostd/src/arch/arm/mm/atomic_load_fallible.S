@@ -9,15 +9,11 @@
 .global __atomic_load_fallible
 .type __atomic_load_fallible, @function
 __atomic_load_fallible: # (ptr: *const u32) -> u64;
-    li t0, {SSTATUS_SUM}
-    csrs sstatus, t0
 load:
-    lwu a0, (a0)
-    csrc sstatus, t0
+    ldr     w0, [x0]
     ret
 load_fault:
-    li a0, -1
-    csrc sstatus, t0
+    mov     x0, #-1
     ret
 .size __atomic_load_fallible, .-__atomic_load_fallible
 

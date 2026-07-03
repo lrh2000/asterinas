@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use core::{arch::asm, intrinsics::AtomicOrdering::Relaxed, ops::Range};
+use core::{arch::asm, ops::Range};
+
+pub(crate) use util::{
+    __atomic_cmpxchg_fallible, __atomic_load_fallible, __memcpy_fallible, __memset_fallible,
+};
 
 use crate::mm::{
     PAGE_SIZE, Paddr, PagingConstsTrait, PagingLevel, PodOnce, Vaddr,
@@ -10,6 +14,8 @@ use crate::mm::{
     },
     page_table::{PteScalar, PteTrait},
 };
+
+mod util;
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct PagingConsts {}
@@ -293,30 +299,5 @@ unsafe impl PteTrait for PageTableEntry {
         } else {
             PteScalar::PageTable(self.paddr(), self.pt_flags())
         }
-    }
-}
-
-pub(crate) unsafe fn __memcpy_fallible(dst: *mut u8, src: *const u8, size: usize) -> usize {
-    // TODO: Implement this fallible operation.
-    unsafe { core::ptr::copy(src, dst, size) };
-    0
-}
-
-pub(crate) unsafe fn __memset_fallible(dst: *mut u8, value: u8, size: usize) -> usize {
-    // TODO: Implement this fallible operation.
-    unsafe { core::ptr::write_bytes(dst, value, size) };
-    0
-}
-
-pub(crate) unsafe fn __atomic_load_fallible(ptr: *const u32) -> u64 {
-    // TODO: Implement this fallible operation.
-    unsafe { core::intrinsics::atomic_load::<_, { Relaxed }>(ptr) as u64 }
-}
-
-pub(crate) unsafe fn __atomic_cmpxchg_fallible(ptr: *mut u32, old_val: u32, new_val: u32) -> u64 {
-    // TODO: Implement this fallible operation.
-    unsafe {
-        core::intrinsics::atomic_cxchg::<_, { Relaxed }, { Relaxed }>(ptr, old_val, new_val).0
-            as u64
     }
 }

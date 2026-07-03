@@ -9,18 +9,14 @@
 .global __memset_fallible
 .type __memset_fallible, @function
 __memset_fallible: # (dst: *mut u8, value: u8, size: usize) -> usize
-    li t0, {SSTATUS_SUM}
-    csrs sstatus, t0
 memset_loop:
-    beqz a2, memset_exit
+    cbz     x2, memset_exit
 memset_store:
-    sb a1, (a0)
-    addi a0, a0, 1
-    addi a2, a2, -1
-    j memset_loop
+    strb    w1, [x0], #1
+    add     x2, x2, #-1
+    b       memset_loop
 memset_exit:
-    mv a0, a2
-    csrc sstatus, t0
+    mov     x0, x2
     ret
 .size __memset_fallible, .-__memset_fallible
 
