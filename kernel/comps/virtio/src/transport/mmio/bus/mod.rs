@@ -15,6 +15,8 @@ use crate::transport::mmio::bus::common_device::{
 #[cfg_attr(target_arch = "riscv64", path = "arch/riscv.rs")]
 #[cfg_attr(target_arch = "loongarch64", path = "arch/loongarch.rs")]
 mod arch;
+#[cfg(target_arch = "riscv64")]
+mod device_tree;
 
 #[expect(clippy::module_inception)]
 pub(super) mod bus;
