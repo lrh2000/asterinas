@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use chrono::{DateTime, Datelike, Timelike};
-use ostd::{arch::boot::DEVICE_TREE, io::IoMem, mm::VmIoOnce, warn};
+use chrono::DateTime;
+use ostd::{io::IoMem, mm::VmIoOnce};
 
 use crate::{SystemTime, rtc::Driver};
 
@@ -11,38 +11,7 @@ pub struct RtcGoldfish {
 
 impl Driver for RtcGoldfish {
     fn try_new() -> Option<Self> {
-        const FDT_COMPATIBLE: &str = "google,goldfish-rtc";
-
-        let node = DEVICE_TREE
-            .get()
-            .unwrap()
-            .find_compatible(&[FDT_COMPATIBLE])?;
-
-        let Some(mut reg) = node.reg() else {
-            warn!("Goldfish node should have exactly one `reg` property, but found zero `reg`s");
-            return None;
-        };
-        let Some(region) = reg.next() else {
-            warn!("Goldfish node should have exactly one `reg` property, but found zero `reg`s");
-            return None;
-        };
-        if reg.next().is_some() {
-            warn!(
-                "Goldfish node should have exactly one `reg` property, but found {} `reg`s",
-                reg.count() + 2
-            );
-            return None;
-        }
-
-        let addr_start = region.starting_address as usize;
-        let Some(addr_end) = addr_start.checked_add(region.size.unwrap()) else {
-            warn!("Goldfish RTC register region size overflows");
-            return None;
-        };
-        let Ok(io_mem) = IoMem::acquire(addr_start..addr_end) else {
-            warn!("Failed to acquire Goldfish RTC MMIO region");
-            return None;
-        };
+        let io_mem = super::device_tree::probe_from_device_tree(&["google,goldfish-rtc"])?;
 
         Some(Self { io_mem })
     }
@@ -62,17 +31,6 @@ impl Driver for RtcGoldfish {
         };
 
         let time = DateTime::from_timestamp_nanos(timestamp as i64).naive_utc();
-        let (is_ad, year) = time.year_ce();
-        debug_assert!(is_ad, "non-negative timestamp should always be AD");
-
-        SystemTime {
-            year: year as u16,
-            month: time.month() as u8,
-            day: time.day() as u8,
-            hour: time.hour() as u8,
-            minute: time.minute() as u8,
-            second: time.second() as u8,
-            nanos: time.nanosecond() as u64,
-        }
+        SystemTime::from(time)
     }
 }

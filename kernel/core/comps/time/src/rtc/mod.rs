@@ -67,3 +67,57 @@ impl Driver for RtcDummy {
         }
     }
 }
+
+#[cfg(any(target_arch = "riscv64", target_arch = "loongarch64"))]
+mod device_tree {
+    use ostd::{arch::boot::DEVICE_TREE, io::IoMem, warn};
+
+    /// Probes a RTC node from the device tree.
+    ///
+    /// The RTC node should have exactly one I/O memory region and the region should be available.
+    /// Otherwise, this method will fail.
+    pub(super) fn probe_from_device_tree(comptaible: &[&str]) -> Option<IoMem> {
+        let device_tree = DEVICE_TREE.get().unwrap();
+
+        let node = device_tree.find_compatible(comptaible)?;
+
+        let Some(mut reg) = node.reg() else {
+            warn!(
+                "'{}' node should have exactly one `reg` property, but found zero `reg`s",
+                node.name
+            );
+            return None;
+        };
+        let Some(region) = reg.next() else {
+            warn!(
+                "'{}' node should have exactly one `reg` property, but found zero `reg`s",
+                node.name
+            );
+            return None;
+        };
+        if reg.next().is_some() {
+            warn!(
+                "'{}' node should have exactly one `reg` property, but found {} `reg`s",
+                node.name,
+                reg.count() + 2
+            );
+            return None;
+        }
+
+        let addr_start = region.starting_address as usize;
+        let Some(addr_size) = region.size else {
+            warn!("'{}' RTC register region is incomplete", node.name);
+            return None;
+        };
+        let Some(addr_end) = addr_start.checked_add(addr_size) else {
+            warn!("'{}' RTC register region size overflows", node.name);
+            return None;
+        };
+        let Ok(io_mem) = IoMem::acquire(addr_start..addr_end) else {
+            warn!("Failed to acquire '{}' RTC MMIO region", node.name);
+            return None;
+        };
+
+        Some(io_mem)
+    }
+}
