@@ -49,7 +49,7 @@ fn parse_framebuffer_info() -> Option<BootloaderFramebufferArg> {
     None
 }
 
-fn parse_memory_regions() -> MemoryRegionArray {
+fn parse_memory_regions(device_tree_paddr: usize) -> MemoryRegionArray {
     let mut regions = MemoryRegionArray::new();
 
     for region in DEVICE_TREE.get().unwrap().memory().regions() {
@@ -94,6 +94,13 @@ fn parse_memory_regions() -> MemoryRegionArray {
             .unwrap();
     }
 
+    // Add the device tree region.
+    regions.push(MemoryRegion::new(
+        device_tree_paddr,
+        DEVICE_TREE.get().unwrap().total_size(),
+        MemoryRegionType::Module,
+    ));
+
     regions.into_non_overlapping()
 }
 
@@ -112,12 +119,8 @@ fn parse_initramfs_range() -> Option<(usize, usize)> {
 /// - The caller must follow C calling conventions and put the right arguments in registers.
 // SAFETY: The name does not collide with other symbols.
 #[unsafe(no_mangle)]
-unsafe extern "C" fn arm_boot() -> ! {
-    // This is the physical address of the device tree, as shown in the QEMU documentations:
-    // <https://qemu-project.gitlab.io/qemu/system/arm/virt.html#hardware-configuration-information-for-bare-metal-programming>.
-    // FIXME: In order to support various other boards, we need more reliable way to obtain the
-    // device tree location.
-    let device_tree_ptr = paddr_to_vaddr(0x4000_0000) as *const u8;
+unsafe extern "C" fn arm_boot(device_tree_paddr: usize) -> ! {
+    let device_tree_ptr = paddr_to_vaddr(device_tree_paddr) as *const u8;
     let fdt = unsafe { fdt::Fdt::from_ptr(device_tree_ptr).unwrap() };
     DEVICE_TREE.call_once(|| fdt);
 
@@ -129,7 +132,7 @@ unsafe extern "C" fn arm_boot() -> ! {
         initramfs: parse_initramfs(),
         acpi_arg: parse_acpi_arg(),
         framebuffer_arg: parse_framebuffer_info(),
-        memory_regions: parse_memory_regions(),
+        memory_regions: parse_memory_regions(device_tree_paddr),
     });
 
     // SAFETY: The safety is guaranteed by the safety preconditions and the fact that we call it

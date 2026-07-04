@@ -1,8 +1,8 @@
 ENTRY(_start)
 OUTPUT_ARCH(aarch64)
 
-KERNEL_LMA = 0x80200000;
-KERNEL_VMA = 0xffffffff80200000;
+KERNEL_LMA = 0x40200000;
+KERNEL_VMA = 0xffffffff40200000;
 KERNEL_VMA_OFFSET = KERNEL_VMA - KERNEL_LMA;
 
 SECTIONS
@@ -102,4 +102,5 @@ SECTIONS
     }
 
     __kernel_end = .;
+    __kernel_size = . - __kernel_start;
 }
