@@ -426,7 +426,7 @@ pub fn handle_user_signal(
         restorer_addr
     } else {
         cfg_if::cfg_if! {
-            if #[cfg(target_arch = "riscv64")] {
+            if #[cfg(any(target_arch = "riscv64", target_arch = "aarch64"))] {
                 ctx.user_space().vmar().process_vm().vdso_base()
                     + crate::vdso::__VDSO_RT_SIGRETURN_OFFSET
             } else {
