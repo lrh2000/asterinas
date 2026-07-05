@@ -226,6 +226,9 @@ const PREBUILT_VDSO_LIB: &[u8] =
 #[cfg(target_arch = "riscv64")]
 const PREBUILT_VDSO_LIB: &[u8] =
     include_bytes!(concat!(env!("VDSO_LIBRARY_DIR"), "/vdso_riscv64.so"));
+#[cfg(target_arch = "aarch64")]
+const PREBUILT_VDSO_LIB: &[u8] =
+    include_bytes!(concat!(env!("VDSO_LIBRARY_DIR"), "/vdso_aarch64.so"));
 
 /// The offset from the vDSO base to the `__vdso_rt_sigreturn` function.
 ///
@@ -233,6 +236,8 @@ const PREBUILT_VDSO_LIB: &[u8] =
 /// `readelf -s vdso_riscv64.so | grep '__vdso_rt_sigreturn'`.
 #[cfg(target_arch = "riscv64")]
 pub const __VDSO_RT_SIGRETURN_OFFSET: usize = 0x5b0;
+#[cfg(target_arch = "aarch64")]
+pub const __VDSO_RT_SIGRETURN_OFFSET: usize = 0x538;
 
 impl Vdso {
     /// Constructs a new `Vdso`, including an initialized `VdsoData` and a VMO of the vDSO.
@@ -250,9 +255,12 @@ impl Vdso {
                 .unwrap();
 
             // Write vDSO library to vDSO VMO.
-            let mut reader =
-                VmReader::from(&PREBUILT_VDSO_LIB[..VDSO_VMO_LAYOUT.text_segment_size])
-                    .to_fallible();
+            let mut reader = VmReader::from(
+                &PREBUILT_VDSO_LIB[..VDSO_VMO_LAYOUT
+                    .text_segment_size
+                    .min(PREBUILT_VDSO_LIB.len())],
+            )
+            .to_fallible();
             vdso_vmo
                 .write(VDSO_VMO_LAYOUT.text_segment_offset, &mut reader)
                 .unwrap();
@@ -407,7 +415,7 @@ pub const VDSO_VMO_LAYOUT: VdsoVmoLayout = VdsoVmoLayout {
     size: 5 * PAGE_SIZE,
 };
 
-#[cfg(target_arch = "riscv64")]
+#[cfg(any(target_arch = "riscv64", target_arch = "aarch64"))]
 pub const VDSO_VMO_LAYOUT: VdsoVmoLayout = VdsoVmoLayout {
     // https://elixir.bootlin.com/linux/v6.2.10/source/arch/riscv/kernel/vdso.c#L247
     data_segment_offset: 0,
