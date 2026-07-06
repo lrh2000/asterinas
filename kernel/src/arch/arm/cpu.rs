@@ -107,6 +107,7 @@ impl SigContext {
         copy_gp_regs!(gp_regs);
         dst.set_stack_pointer(self.sp as usize);
         dst.set_instruction_pointer(self.pc as usize);
+        dst.set_process_state(self.pstate as usize);
     }
 
     pub fn copy_user_regs_from(&mut self, src: &UserContext) {
@@ -120,6 +121,7 @@ impl SigContext {
         copy_gp_regs!(gp_regs);
         self.sp = src.stack_pointer() as u64;
         self.pc = src.instruction_pointer() as u64;
+        self.pstate = src.process_state() as u64;
     }
 }
 

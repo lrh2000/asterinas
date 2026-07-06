@@ -175,6 +175,16 @@ impl UserContext {
         self.exception.take()
     }
 
+    /// Sets the process state (PSTATE).
+    pub fn set_process_state(&mut self, pstate: usize) {
+        self.user_context.spsr = pstate;
+    }
+
+    /// Returns the process state (PSTATE).
+    pub fn process_state(&self) -> usize {
+        self.user_context.spsr
+    }
+
     /// Sets the thread-local storage pointer.
     pub fn set_tls_pointer(&mut self, tls: usize) {
         self.user_context.tpidr = tls;
