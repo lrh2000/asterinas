@@ -23,6 +23,7 @@ use crate::{
         file::BundleFile,
     },
     cli::BuildArgs,
+    commands::build::bin::make_aarch64_image,
     config::{
         Config,
         scheme::{ActionChoice, BootMethod, BootProtocol},
@@ -185,15 +186,18 @@ pub fn do_cached_build(
             bundle.consume_aster_bin(aster_elf);
         }
         BootMethod::QemuDirect => {
-            let aster_bin = match grub.boot_protocol {
-                BootProtocol::Linux => make_install_bzimage(
+            let aster_bin = if config.target_arch == Arch::Aarch64 {
+                make_aarch64_image(&osdk_output_directory, &boot_elf)
+            } else if grub.boot_protocol == BootProtocol::Linux {
+                make_install_bzimage(
                     &osdk_output_directory,
                     &osdk_output_directory,
                     &boot_elf,
                     build.linux_x86_legacy_boot,
                     config.build.encoding.clone(),
-                ),
-                _ => make_elf_for_qemu(boot_elf),
+                )
+            } else {
+                make_elf_for_qemu(boot_elf)
             };
             bundle.consume_aster_bin(aster_bin);
         }
