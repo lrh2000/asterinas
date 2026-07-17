@@ -204,6 +204,8 @@ mod create_page_table {
     fn create_user_page_table() {
         use spin::Once;
 
+        use crate::arch::mm::USER_PAGE_TABLE_SHARES_KERNEL;
+
         // To make kernel PT `'static`, required for `create_user_page_table`.
         static MOCK_KERNEL_PT: Once<PageTable<KernelPtConfig>> = Once::new();
         MOCK_KERNEL_PT.call_once(PageTable::<KernelPtConfig>::new_kernel_page_table);
@@ -216,21 +218,27 @@ mod create_page_table {
         let mut user_root = user_pt.root.borrow().lock(&guard);
 
         const NR_PTES_PER_NODE: usize = nr_subpage_per_huge::<PagingConsts>();
-        for i in NR_PTES_PER_NODE / 2..NR_PTES_PER_NODE {
-            let kernel_entry = kernel_root.entry(i);
-            let user_entry = user_root.entry(i);
+        if USER_PAGE_TABLE_SHARES_KERNEL {
+            for i in NR_PTES_PER_NODE / 2..NR_PTES_PER_NODE {
+                let kernel_entry = kernel_root.entry(i);
+                let user_entry = user_root.entry(i);
 
-            let PteStateRef::PageTable(kernel_node) = kernel_entry.to_ref() else {
-                panic!("expected a node reference at {} of kernel root PT", i);
-            };
-            assert_eq!(kernel_node.level(), PagingConsts::NR_LEVELS - 1);
+                let PteStateRef::PageTable(kernel_node) = kernel_entry.to_ref() else {
+                    panic!("expected a node reference at {} of kernel root PT", i);
+                };
+                assert_eq!(kernel_node.level(), PagingConsts::NR_LEVELS - 1);
 
-            let PteStateRef::PageTable(user_node) = user_entry.to_ref() else {
-                panic!("expected a node reference at {} of user root PT", i);
-            };
-            assert_eq!(user_node.level(), PagingConsts::NR_LEVELS - 1);
+                let PteStateRef::PageTable(user_node) = user_entry.to_ref() else {
+                    panic!("expected a node reference at {} of user root PT", i);
+                };
+                assert_eq!(user_node.level(), PagingConsts::NR_LEVELS - 1);
 
-            assert_eq!(kernel_node.paddr(), user_node.paddr());
+                assert_eq!(kernel_node.paddr(), user_node.paddr());
+            }
+        } else {
+            for i in 0..NR_PTES_PER_NODE {
+                assert!(matches!(user_root.entry(i).to_ref(), PteStateRef::Absent));
+            }
         }
     }
 
@@ -292,6 +300,45 @@ mod range_checks {
         // Invalid ranges fail.
         assert!(page_table.cursor_mut(&preempt_guard, &invalid_va).is_err());
         assert!(page_table.cursor_mut(&preempt_guard, &kernel_va).is_err());
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[ktest]
+    fn full_low_48_bit_range() {
+        const FIRST_HIGH_USER_ADDR: Vaddr = 0x0000_8000_0000_0000;
+        const LOW_48_BIT_END: Vaddr = 0x0000_ffff_ffff_ffff;
+        const ABOVE_LOW_48_BIT: Vaddr = 0x0001_0000_0000_0000;
+
+        assert_eq!(vaddr_range::<UserPtConfig>(), 0..=LOW_48_BIT_END);
+
+        let page_table =
+            create_user_pt_mapped_at(FIRST_HIGH_USER_ADDR..FIRST_HIGH_USER_ADDR + PAGE_SIZE);
+        assert!(page_table.page_walk(FIRST_HIGH_USER_ADDR).is_some());
+        assert!(
+            page_table
+                .page_walk(FIRST_HIGH_USER_ADDR + PAGE_SIZE - 1)
+                .is_some()
+        );
+
+        let preempt_guard = disable_preempt();
+        assert!(
+            page_table
+                .cursor_mut(
+                    &preempt_guard,
+                    &(ABOVE_LOW_48_BIT..ABOVE_LOW_48_BIT + PAGE_SIZE),
+                )
+                .is_err()
+        );
+
+        let mut cursor = page_table
+            .cursor_mut(
+                &preempt_guard,
+                &(FIRST_HIGH_USER_ADDR..FIRST_HIGH_USER_ADDR + PAGE_SIZE),
+            )
+            .unwrap();
+        assert!(unsafe { cursor.take_next(PAGE_SIZE) }.is_some());
+        drop(cursor);
+        assert!(page_table.page_walk(FIRST_HIGH_USER_ADDR).is_none());
     }
 
     #[ktest]

@@ -751,6 +751,75 @@ mod vmspace {
         assert!(writer_result.is_err());
     }
 
+    /// Verifies high-address access and isolation across AArch64 user roots.
+    #[cfg(target_arch = "aarch64")]
+    #[ktest]
+    fn high_address_context_switch_isolation() {
+        use core::mem::size_of;
+
+        use crate::mm::PAGE_SIZE;
+
+        const HIGH_USER_ADDR: Vaddr = 0x0000_8000_0000_0000;
+        const ABOVE_LOW_48_BIT: Vaddr = 0x0001_0000_0000_0000;
+        const FIRST_VALUE: u64 = 0x1111_2222_3333_4444;
+        const SECOND_VALUE: u64 = 0xaaaa_bbbb_cccc_dddd;
+
+        let first = Arc::new(VmSpace::new());
+        let second = Arc::new(VmSpace::new());
+        let range = HIGH_USER_ADDR..HIGH_USER_ADDR + PAGE_SIZE;
+        let prop = PageProperty::new_user(PageFlags::RW, CachePolicy::Writeback);
+        let preempt_guard = disable_preempt();
+
+        for vmspace in [&first, &second] {
+            let mut cursor = vmspace
+                .cursor_mut(&preempt_guard, &range)
+                .expect("the high user range should be valid");
+            cursor.map(create_dummy_frame(), prop);
+        }
+
+        first.activate();
+        first
+            .writer(HIGH_USER_ADDR, size_of::<u64>())
+            .unwrap()
+            .write_val(&FIRST_VALUE)
+            .unwrap();
+
+        second.activate();
+        second
+            .writer(HIGH_USER_ADDR, size_of::<u64>())
+            .unwrap()
+            .write_val(&SECOND_VALUE)
+            .unwrap();
+
+        first.activate();
+        assert_eq!(
+            first
+                .reader(HIGH_USER_ADDR, size_of::<u64>())
+                .unwrap()
+                .read_val::<u64>()
+                .unwrap(),
+            FIRST_VALUE
+        );
+
+        second.activate();
+        assert_eq!(
+            second
+                .reader(HIGH_USER_ADDR, size_of::<u64>())
+                .unwrap()
+                .read_val::<u64>()
+                .unwrap(),
+            SECOND_VALUE
+        );
+        assert!(second.reader(ABOVE_LOW_48_BIT, 1).is_err());
+
+        for vmspace in [&first, &second] {
+            let mut cursor = vmspace
+                .cursor_mut(&preempt_guard, &range)
+                .expect("the high user range should remain valid");
+            assert_eq!(cursor.unmap(PAGE_SIZE), 1);
+        }
+    }
+
     /// Creates overlapping cursors and verifies handling.
     #[ktest]
     fn overlapping_cursors() {

@@ -29,13 +29,23 @@ impl PagingConstsTrait for PagingConsts {
     const PTE_SIZE: usize = size_of::<PageTableEntry>();
 }
 
-/// The paging constants used by userspace page tables.
-pub(crate) type UserPagingConsts = PagingConsts;
+/// The paging constants used by the non-sign-extended `TTBR0_EL1` region.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct UserPagingConsts {}
+
+impl PagingConstsTrait for UserPagingConsts {
+    const BASE_PAGE_SIZE: usize = PagingConsts::BASE_PAGE_SIZE;
+    const NR_LEVELS: PagingLevel = PagingConsts::NR_LEVELS;
+    const ADDRESS_WIDTH: usize = PagingConsts::ADDRESS_WIDTH;
+    const VA_SIGN_EXT: bool = false;
+    const HIGHEST_TRANSLATION_LEVEL: PagingLevel = PagingConsts::HIGHEST_TRANSLATION_LEVEL;
+    const PTE_SIZE: usize = PagingConsts::PTE_SIZE;
+}
 
 /// Whether userspace page tables contain the kernel's top-level mappings.
-pub(crate) const USER_PAGE_TABLE_SHARES_KERNEL: bool = true;
+pub(crate) const USER_PAGE_TABLE_SHARES_KERNEL: bool = false;
 /// The top-level entries managed by userspace page tables.
-pub(crate) const USER_TOP_LEVEL_INDEX_RANGE: Range<usize> = 0..256;
+pub(crate) const USER_TOP_LEVEL_INDEX_RANGE: Range<usize> = 0..512;
 
 bitflags::bitflags! {
     /// Possible flags for a page table entry.
@@ -152,7 +162,7 @@ pub(crate) unsafe fn sync_dma_range<D: DmaDirection>(range: Range<Vaddr>) {
     }
 }
 
-/// Activates the given root-level page table.
+/// Activates the given userspace root-level page table in `TTBR0_EL1`.
 ///
 /// # Safety
 ///
@@ -163,7 +173,6 @@ pub(crate) unsafe fn activate_page_table(root_paddr: Paddr) {
     unsafe {
         asm!(
             "msr ttbr0_el1, {root_paddr}",
-            "msr ttbr1_el1, {root_paddr}",
             "isb",
             root_paddr = in(reg) root_paddr,
             options(nomem, nostack, preserves_flags),
@@ -180,7 +189,19 @@ pub(crate) unsafe fn activate_page_table(root_paddr: Paddr) {
 /// continue kernel execution and that this is the CPU's first managed root.
 pub(crate) unsafe fn activate_kernel_page_table(root_paddr: Paddr) {
     // SAFETY: The safety is upheld by the caller.
-    unsafe { activate_page_table(root_paddr) };
+    unsafe {
+        asm!(
+            // `TTBR0_EL1` must stop using the boot root before it is
+            // dismissed. It remains a temporary kernel-root alias until the
+            // first userspace root is activated on this CPU.
+            "msr ttbr0_el1, {root_paddr}",
+            "msr ttbr1_el1, {root_paddr}",
+            "isb",
+            root_paddr = in(reg) root_paddr,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+    tlb_flush_all_including_global();
 }
 
 pub(crate) fn current_page_table_paddr() -> Paddr {

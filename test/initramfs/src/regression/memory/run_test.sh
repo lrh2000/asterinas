@@ -13,3 +13,7 @@ set -e
 ./mmap/mmap_readahead
 ./mmap/mmap_shared_filebacked
 ./mmap/mmap_vmrss
+
+if [ "$(uname -m)" = "aarch64" ]; then
+	./mmap/mmap_high_address
+fi

@@ -81,11 +81,16 @@ pub const KERNEL_END_VADDR: Vaddr = 0xffff_ffff_ffff_0000;
 /// A typical way to reserve half of the address space for the kernel is
 /// to use the highest `ADDRESS_WIDTH`-bit virtual address space.
 ///
-/// Also, the top page is not regarded as usable since it's a workaround
-/// for some x86_64 CPUs' bugs. See
+/// Also, the top page is not regarded as usable. On x86_64 this works around
+/// CPU bugs; see
 /// <https://github.com/torvalds/linux/blob/480e035fc4c714fb5536e64ab9db04fedc89e910/arch/x86/include/asm/page_64.h#L68-L78>
-/// for the rationale.
+/// for the rationale. Other architectures retain one top guard page so the
+/// end-exclusive userspace limit never reaches the hardware boundary.
+#[cfg(not(target_arch = "aarch64"))]
 pub const MAX_USERSPACE_VADDR: Vaddr = (0x0000_0040_0000_0000 << ADDR_WIDTH_SHIFT) - PAGE_SIZE;
+/// The maximum AArch64 userspace virtual address (non-inclusive).
+#[cfg(target_arch = "aarch64")]
+pub const MAX_USERSPACE_VADDR: Vaddr = 0x0001_0000_0000_0000 - PAGE_SIZE;
 
 /// The kernel address space.
 ///
