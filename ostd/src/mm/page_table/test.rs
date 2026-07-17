@@ -4,6 +4,7 @@ use ostd_pod::FromZeros;
 
 use super::*;
 use crate::{
+    arch::mm::PagingConsts,
     mm::{
         FrameAllocOptions, MAX_USERSPACE_VADDR, PAGE_SIZE,
         kspace::{KernelPtConfig, LINEAR_MAPPING_BASE_VADDR},
@@ -255,6 +256,27 @@ mod create_page_table {
 
 mod range_checks {
     use super::{test_utils::*, *};
+
+    #[ktest]
+    fn user_paging_constants_match_hardware_layout() {
+        use crate::arch::mm::{USER_TOP_LEVEL_INDEX_RANGE, UserPagingConsts};
+
+        assert_eq!(
+            UserPagingConsts::BASE_PAGE_SIZE,
+            PagingConsts::BASE_PAGE_SIZE
+        );
+        assert_eq!(UserPagingConsts::NR_LEVELS, PagingConsts::NR_LEVELS);
+        assert_eq!(
+            UserPagingConsts::HIGHEST_TRANSLATION_LEVEL,
+            PagingConsts::HIGHEST_TRANSLATION_LEVEL
+        );
+        assert_eq!(UserPagingConsts::PTE_SIZE, PagingConsts::PTE_SIZE);
+        assert_eq!(UserPagingConsts::ADDRESS_WIDTH, PagingConsts::ADDRESS_WIDTH);
+        assert_eq!(
+            UserPtConfig::TOP_LEVEL_INDEX_RANGE,
+            USER_TOP_LEVEL_INDEX_RANGE
+        );
+    }
 
     #[ktest]
     fn range_check() {

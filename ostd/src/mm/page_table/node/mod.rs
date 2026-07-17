@@ -84,9 +84,8 @@ impl<C: PageTableConfig> PageTableNode<C> {
     ///
     /// # Safety
     ///
-    /// The caller must ensure that the page table to be activated has
-    /// proper mappings for the kernel and has the correct const parameters
-    /// matching the current CPU.
+    /// The caller must ensure that the architecture's kernel translations are
+    /// active and that the page table has the correct constants for this CPU.
     ///
     /// # Panics
     ///
@@ -109,15 +108,15 @@ impl<C: PageTableConfig> PageTableNode<C> {
         drop(unsafe { Self::from_raw(last_activated_paddr) });
     }
 
-    /// Activates the (root) page table assuming it is the first activation.
+    /// Activates the kernel root page table assuming it is the first activation.
     ///
     /// It will not try dropping the last activate page table. It is the same
     /// with [`Self::activate()`] in other senses.
-    pub(super) unsafe fn first_activate(&self) {
-        use crate::arch::mm::activate_page_table;
+    pub(super) unsafe fn first_activate_kernel(&self) {
+        use crate::arch::mm::activate_kernel_page_table;
 
         // SAFETY: The safety is upheld by the caller.
-        unsafe { activate_page_table(self.clone().into_raw()) };
+        unsafe { activate_kernel_page_table(self.clone().into_raw()) };
     }
 }
 

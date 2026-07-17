@@ -133,8 +133,9 @@ pub fn paddr_to_vaddr(pa: Paddr) -> usize {
 
 /// The kernel page table instance.
 ///
-/// It manages the kernel mapping of all address spaces by sharing the kernel part. And it
-/// is unlikely to be activated.
+/// It manages the kernel mappings used by every address space. Architectures
+/// with a single translation root share its top-level entries with user page
+/// tables; architectures with separate roots keep it active independently.
 pub(super) static KERNEL_PAGE_TABLE: Once<PageTable<KernelPtConfig>> = Once::new();
 
 #[derive(Clone, Debug)]
@@ -309,7 +310,7 @@ pub unsafe fn activate_kernel_page_table() {
         .expect("The kernel page table is not initialized yet");
     // SAFETY: the kernel page table is initialized properly.
     unsafe {
-        kpt.first_activate_unchecked();
+        kpt.first_activate_kernel_unchecked();
         crate::arch::mm::tlb_flush_all_including_global();
     }
 }

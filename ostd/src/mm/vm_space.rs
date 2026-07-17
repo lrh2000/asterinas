@@ -13,7 +13,9 @@ use core::{ops::Range, sync::atomic::Ordering};
 use super::{AnyUFrameMeta, PagingLevel, page_table::PageTableConfig};
 use crate::{
     Error,
-    arch::mm::{PageTableEntry, PagingConsts, current_page_table_paddr},
+    arch::mm::{
+        PageTableEntry, USER_TOP_LEVEL_INDEX_RANGE, UserPagingConsts, current_page_table_paddr,
+    },
     cpu::{AtomicCpuSet, CpuSet, PinCurrentCpu},
     cpu_local_cell,
     io::IoMem,
@@ -682,10 +684,10 @@ pub(crate) struct UserPtConfig {}
 // `item_ref_from_raw` are correctly implemented with respect to the `Item` and
 // `ItemRef` types.
 unsafe impl PageTableConfig for UserPtConfig {
-    const TOP_LEVEL_INDEX_RANGE: Range<usize> = 0..256;
+    const TOP_LEVEL_INDEX_RANGE: Range<usize> = USER_TOP_LEVEL_INDEX_RANGE;
 
     type E = PageTableEntry;
-    type C = PagingConsts;
+    type C = UserPagingConsts;
 
     type Item = VmItem;
     type ItemRef<'a> = VmItemRef<'a>;

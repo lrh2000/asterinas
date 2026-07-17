@@ -23,7 +23,7 @@ use super::{
     nr_subpage_per_huge, page_prop::PageProperty, page_size, vm_space::UserPtConfig,
 };
 use crate::{
-    arch::mm::{PageTableEntry, PagingConsts},
+    arch::mm::{PageTableEntry, USER_PAGE_TABLE_SHARES_KERNEL},
     mm::page_prop::PageTableFlags,
     task::{atomic_mode::AsAtomicModeGuard, disable_preempt},
 };
@@ -85,8 +85,9 @@ pub(crate) unsafe trait PageTableConfig:
     /// If we can remove the top-level page table entries.
     ///
     /// This is for the kernel page table, whose second-top-level page
-    /// tables need `'static` lifetime to be shared with user page tables.
-    /// Other page tables do not need to set this to `false`.
+    /// tables need `'static` lifetime. Architectures with a single translation
+    /// root also share those tables with user page tables. Other page tables do
+    /// not need to set this to `false`.
     const TOP_LEVEL_CAN_UNMAP: bool = true;
 
     /// The type of the page table entry.
@@ -321,8 +322,8 @@ pub struct PageTable<C: PageTableConfig> {
 
 impl PageTable<UserPtConfig> {
     pub fn activate(&self) {
-        // SAFETY: The user mode page table is safe to activate since the kernel
-        // mappings are shared.
+        // SAFETY: The architecture either shares the kernel mappings in this
+        // root or keeps them active through a separate kernel translation root.
         unsafe {
             self.root.activate();
         }
@@ -350,10 +351,15 @@ impl PageTable<KernelPtConfig> {
 
     /// Create a new user page table.
     ///
-    /// This should be the only way to create the user page table, that is to
-    /// duplicate the kernel page table with all the kernel mappings shared.
+    /// This should be the only way to create a user page table. Architectures
+    /// with a single translation root copy the kernel's top-level mappings;
+    /// architectures with separate roots leave the user root empty.
     pub(in crate::mm) fn create_user_page_table(&'static self) -> PageTable<UserPtConfig> {
-        let new_root = PageTableNode::alloc(PagingConsts::NR_LEVELS);
+        let new_root = PageTableNode::alloc(UserPtConfig::NR_LEVELS);
+
+        if !USER_PAGE_TABLE_SHARES_KERNEL {
+            return PageTable::<UserPtConfig> { root: new_root };
+        }
 
         let preempt_guard = disable_preempt();
         let mut root_node = self.root.borrow().lock(&preempt_guard);
@@ -362,8 +368,9 @@ impl PageTable<KernelPtConfig> {
         const {
             assert!(!KernelPtConfig::TOP_LEVEL_CAN_UNMAP);
             assert!(
-                UserPtConfig::TOP_LEVEL_INDEX_RANGE.end
-                    <= KernelPtConfig::TOP_LEVEL_INDEX_RANGE.start
+                !USER_PAGE_TABLE_SHARES_KERNEL
+                    || UserPtConfig::TOP_LEVEL_INDEX_RANGE.end
+                        <= KernelPtConfig::TOP_LEVEL_INDEX_RANGE.start
             );
         }
 
@@ -406,9 +413,9 @@ impl<C: PageTableConfig> PageTable<C> {
         }
     }
 
-    pub(in crate::mm) unsafe fn first_activate_unchecked(&self) {
+    pub(in crate::mm) unsafe fn first_activate_kernel_unchecked(&self) {
         // SAFETY: The safety is upheld by the caller.
-        unsafe { self.root.first_activate() };
+        unsafe { self.root.first_activate_kernel() };
     }
 
     /// The physical address of the root page table.

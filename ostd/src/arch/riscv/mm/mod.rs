@@ -37,6 +37,14 @@ impl PagingConstsTrait for PagingConsts {
     const PTE_SIZE: usize = size_of::<PageTableEntry>();
 }
 
+/// The paging constants used by userspace page tables.
+pub(crate) type UserPagingConsts = PagingConsts;
+
+/// Whether userspace page tables contain the kernel's top-level mappings.
+pub(crate) const USER_PAGE_TABLE_SHARES_KERNEL: bool = true;
+/// The top-level entries managed by userspace page tables.
+pub(crate) const USER_TOP_LEVEL_INDEX_RANGE: Range<usize> = 0..256;
+
 #[cfg(feature = "riscv_sv39_mode")]
 impl PagingConstsTrait for PagingConsts {
     const BASE_PAGE_SIZE: usize = 4096;
@@ -169,6 +177,17 @@ pub(crate) unsafe fn activate_page_table(root_paddr: Paddr) {
 
     // SAFETY: The safety is upheld by the caller.
     unsafe { riscv::register::satp::set(mode, 0, ppn) };
+}
+
+/// Activates the kernel root-level page table during CPU initialization.
+///
+/// # Safety
+///
+/// The caller must ensure that the root contains all mappings needed to
+/// continue kernel execution and that this is the CPU's first managed root.
+pub(crate) unsafe fn activate_kernel_page_table(root_paddr: Paddr) {
+    // SAFETY: The safety is upheld by the caller.
+    unsafe { activate_page_table(root_paddr) };
 }
 
 pub(crate) fn current_page_table_paddr() -> Paddr {
