@@ -4,7 +4,7 @@
 
 pub(crate) mod smp;
 
-use core::arch::global_asm;
+use core::{arch::global_asm, ops::Range};
 
 use fdt::Fdt;
 use spin::Once;
@@ -21,6 +21,21 @@ global_asm!(include_str!("bsp_boot.S"));
 
 /// The Flattened Device Tree of the platform.
 pub static DEVICE_TREE: Once<Fdt> = Once::new();
+
+/// The physical address of [`DEVICE_TREE`].
+static DEVICE_TREE_PADDR: Once<usize> = Once::new();
+
+const BOOT_BLOCK_SIZE: usize = 1 << 30;
+
+fn containing_boot_block(paddr: usize) -> Range<usize> {
+    let start = paddr & !(BOOT_BLOCK_SIZE - 1);
+    start..start + BOOT_BLOCK_SIZE
+}
+
+/// Returns the physical range covered by the temporary boot mapping for the DTB.
+pub(crate) fn device_tree_boot_mapping_range() -> Range<usize> {
+    containing_boot_block(*DEVICE_TREE_PADDR.get().unwrap())
+}
 
 fn parse_bootloader_name() -> &'static str {
     "Unknown"
@@ -121,6 +136,7 @@ fn parse_initramfs_range() -> Option<(usize, usize)> {
 // SAFETY: The name does not collide with other symbols.
 #[unsafe(no_mangle)]
 unsafe extern "C" fn arm_boot(device_tree_paddr: usize) -> ! {
+    DEVICE_TREE_PADDR.call_once(|| device_tree_paddr);
     let device_tree_ptr = paddr_to_vaddr(device_tree_paddr) as *const u8;
     let fdt = unsafe { Fdt::from_ptr(device_tree_ptr).unwrap() };
     DEVICE_TREE.call_once(|| fdt);
@@ -139,4 +155,19 @@ unsafe extern "C" fn arm_boot(device_tree_paddr: usize) -> ! {
     // SAFETY: The safety is guaranteed by the safety preconditions and the fact that we call it
     // once after setting up necessary resources.
     unsafe { start_kernel() };
+}
+
+#[cfg(ktest)]
+mod test {
+    use super::*;
+    use crate::prelude::ktest;
+
+    #[ktest]
+    fn device_tree_boot_mapping_is_one_aligned_block() {
+        assert_eq!(
+            containing_boot_block(0x27fe0_0000),
+            0x2_4000_0000..0x2_8000_0000
+        );
+        assert_eq!(containing_boot_block(0x4000_0000), 0x4000_0000..0x8000_0000);
+    }
 }

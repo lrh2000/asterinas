@@ -93,6 +93,22 @@ die_exception_level:
     mov     x4, #(MAIR_0WBWA | MAIR_1DEVICE)
     msr     mair_el1, x4
 
+    # The boot table statically maps the first 4 GiB. Boot loaders may place
+    # the DTB near the end of larger guests, so map its containing 1-GiB block
+    # before Rust dereferences the linear-map address. The single L3 table can
+    # represent the first 512 GiB of physical memory.
+    lsr     x4, x0, #30
+    cmp     x4, #512
+die_device_tree_address:
+    b.hs    die_device_tree_address
+    ldr     x5, =boot_l3pt_linear_id
+    add     x5, x5, x4, lsl #3
+    lsl     x6, x4, #30
+    mov     x7, #(PTE_VALID | PTE_SH_INNER | PTE_ACCESS)
+    orr     x6, x6, x7
+    str     x6, [x5]
+    dsb     sy
+
     # Load translation tables.
     ldr     x4, =boot_l4pt
     msr     ttbr0_el1, x4

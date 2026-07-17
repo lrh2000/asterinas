@@ -621,6 +621,8 @@ fn add_temp_linear_mapping(max_paddr: Paddr) {
     // won't drag the boot performance much.
     let end_paddr = max_paddr.align_up(PAGE_SIZE);
     let prange = PADDR4G..end_paddr;
+    #[cfg(target_arch = "aarch64")]
+    let device_tree_range = crate::arch::boot::device_tree_boot_mapping_range();
     let prop = PageProperty {
         flags: PageFlags::RW,
         cache: CachePolicy::Writeback,
@@ -631,6 +633,15 @@ fn add_temp_linear_mapping(max_paddr: Paddr) {
     unsafe {
         boot_pt::with_borrow(|boot_pt| {
             for paddr in prange.step_by(PAGE_SIZE) {
+                // The AArch64 entry assembly maps the DTB's 1-GiB block so Rust
+                // can read a DTB placed above the static 4-GiB linear map.
+                // Preserve that equivalent huge mapping instead of trying to
+                // replace it with base-page mappings during early metadata setup.
+                #[cfg(target_arch = "aarch64")]
+                if device_tree_range.contains(&paddr) {
+                    continue;
+                }
+
                 let vaddr = LINEAR_MAPPING_BASE_VADDR + paddr;
                 boot_pt.map_base_page(vaddr, paddr, prop);
             }
