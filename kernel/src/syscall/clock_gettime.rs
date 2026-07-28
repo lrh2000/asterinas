@@ -34,6 +34,32 @@ pub fn sys_clock_gettime(
     Ok(SyscallReturn::Return(0))
 }
 
+pub fn sys_clock_getres(
+    clockid: clockid_t,
+    timespec_addr: Vaddr,
+    ctx: &Context,
+) -> Result<SyscallReturn> {
+    debug!("clockid = {:?}, timespec_addr = 0x{:x}", clockid, timespec_addr);
+
+    // Validate the clock ID without reading it: `read_clock` can panic
+    // (`unimplemented!`) on some dynamic clocks, and a resolution query
+    // never needs the clock's value.
+    if clockid >= 0 {
+        ClockId::try_from(clockid)?;
+    } else {
+        DynamicClockIdInfo::try_from(clockid)?;
+    }
+
+    // The supported clocks all have nanosecond resolution. A null pointer
+    // means the caller only wants to validate the clock ID.
+    if timespec_addr != 0 {
+        let res = timespec_t::from(Duration::from_nanos(1));
+        ctx.user_space().write_val(timespec_addr, &res)?;
+    }
+
+    Ok(SyscallReturn::Return(0))
+}
+
 // The hard-coded clock IDs.
 #[expect(non_camel_case_types)]
 #[repr(i32)]

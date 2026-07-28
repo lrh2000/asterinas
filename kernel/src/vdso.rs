@@ -237,7 +237,7 @@ const PREBUILT_VDSO_LIB: &[u8] =
 #[cfg(target_arch = "riscv64")]
 pub const __VDSO_RT_SIGRETURN_OFFSET: usize = 0x5b0;
 #[cfg(target_arch = "aarch64")]
-pub const __VDSO_RT_SIGRETURN_OFFSET: usize = 0x538;
+pub const __VDSO_RT_SIGRETURN_OFFSET: usize = 0x380;
 
 impl Vdso {
     /// Constructs a new `Vdso`, including an initialized `VdsoData` and a VMO of the vDSO.
