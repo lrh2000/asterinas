@@ -18,7 +18,7 @@ use crate::{
             private::SocketPrivate,
             util::{
                 MessageHeader, RecvFlags, RecvOutput, SendFlags, SocketAddr,
-                datagram_common::{Bound, Inner, select_remote_and_bind_mut},
+                datagram_common::{Inner, select_remote_and_bind_mut},
                 options::{
                     GetSocketLevelOption, SetSocketLevelOption, SocketOptionSet, SocketTimeouts,
                 },
@@ -76,11 +76,17 @@ impl DatagramSocket {
         writer: &mut dyn MultiWrite,
         flags: RecvFlags,
     ) -> Result<(RecvOutput, SocketAddr)> {
-        let result = self
-            .inner
-            .lock()
-            .try_recv(writer, flags)
-            .map(|(output, remote_endpoint)| (output, remote_endpoint.into()))?;
+        let result = {
+            let mut inner = self.inner.lock();
+            let Inner::Bound(bound_datagram) = &mut *inner else {
+                return_errno_with_message!(Errno::EAGAIN, "the socket is not bound");
+            };
+
+            bound_datagram
+                .try_recv(writer, flags)
+                .map(|(output, remote_endpoint)| (output, remote_endpoint.into()))?
+        };
+
         self.pollee.invalidate();
 
         Ok(result)
@@ -217,8 +223,9 @@ impl Socket for DatagramSocket {
             warn!("sending control message is not supported");
         }
 
-        // TODO: Block if the send buffer is full
-        self.try_send(reader, endpoint.as_ref(), flags)
+        self.block_on(IoEvents::OUT, self.timeouts.send_timeout(), || {
+            self.try_send(reader, endpoint.as_ref(), flags)
+        })
     }
 
     fn recvmsg(

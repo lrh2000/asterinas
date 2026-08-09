@@ -185,6 +185,16 @@ type RxCommon = Common<dyn RxDmaHandle>;
 type AnyCommon = Common<dyn DmaHandle>;
 
 impl<D: DmaHandle + ?Sized> Common<D> {
+    fn memory_usage(&self) -> usize {
+        // FIXME: This is not accurate because we may over-allocate. Since the exact allocated size
+        // is unavailable at this time, this is the best way to estimate it.
+        let alloc_size = self.alloc_range.end - self.alloc_range.start;
+        // Also, account for the packet metadata.
+        let common_size = size_of::<Self>();
+
+        alloc_size + common_size
+    }
+
     fn erase_dma_direction(&mut self) -> Box<AnyCommon> {
         let segment = {
             // Reuse the old segment by replacing it with an empty one.
@@ -200,6 +210,26 @@ impl<D: DmaHandle + ?Sized> Common<D> {
             data_range: core::mem::take(&mut self.data_range),
             dma_handle: self.dma_handle.take().map(ToDmaHandle::to_dma_handle),
         })
+    }
+
+    fn clone(&self) -> Result<Box<AnyCommon>> {
+        let total_len = self.data_range.end - self.alloc_range.start;
+        let headroom_len = self.data_range.start - self.alloc_range.start;
+
+        let nframes = total_len.div_ceil(PAGE_SIZE);
+        let segment = FrameAllocOptions::new().alloc_segment(nframes)?;
+
+        let mut writer = segment.writer();
+        writer.skip(headroom_len).limit(total_len - headroom_len);
+        writer.write(self.segment.reader().skip(self.data_range.start));
+
+        let common = Box::new(Common {
+            segment: segment.into(),
+            alloc_range: 0..total_len,
+            data_range: headroom_len..total_len,
+            dma_handle: None,
+        });
+        Ok(common)
     }
 }
 
@@ -353,6 +383,14 @@ impl<L> TxPacket<L> {
         self.0.data_range.end - self.0.data_range.start
     }
 
+    /// Rreturns the number of bytes used to account for memory usage.
+    ///
+    /// The return value should not change for the same packet, regardless of operations such as
+    /// [`Self::pack`].
+    pub fn memory_usage(&self) -> usize {
+        self.0.memory_usage()
+    }
+
     /// Returns a writer that can prepend the header at `header_len` bytes before the `L` layer.
     ///
     /// # Panics
@@ -387,6 +425,12 @@ impl<L> TxPacket<L> {
     pub fn to_rx_packet(mut self) -> RxPacket<L> {
         let common = self.0.erase_dma_direction();
         RxPacket(common, PhantomData)
+    }
+
+    /// Creates a cloned RX packet by copying the payload.
+    pub fn clone_rx_packet(&self) -> Result<RxPacket<L>> {
+        let common = self.0.clone()?;
+        Ok(RxPacket(common, PhantomData))
     }
 }
 
@@ -553,6 +597,14 @@ impl<L> RxPacket<L> {
         self.0.data_range.end - self.0.data_range.start
     }
 
+    /// Rreturns the number of bytes used to account for memory usage.
+    ///
+    /// The return value should not change for the same packet, regardless of operations such as
+    /// [`Self::peel`].
+    pub fn memory_usage(&self) -> usize {
+        self.0.memory_usage()
+    }
+
     /// Truncates the number of bytes at the `L` layter to `len`.
     ///
     /// # Panics
@@ -561,6 +613,13 @@ impl<L> RxPacket<L> {
     pub fn truncate(&mut self, len: usize) {
         assert!(len <= self.0.data_range.end - self.0.data_range.start);
         self.0.data_range.end = self.0.data_range.start + len;
+    }
+
+    /// Creates a cloned packet by copying the payload.
+    #[expect(clippy::should_implement_trait)]
+    pub fn clone(&self) -> Result<Self> {
+        let common = self.0.clone()?;
+        Ok(Self(common, PhantomData))
     }
 }
 

@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: MPL-2.0
 
 use aster_bigtcp::{
-    errors::udp::{RecvError, SendError},
+    errors::{
+        IoError,
+        udp::{RecvError, SendError},
+    },
     wire::IpEndpoint,
 };
 
@@ -35,6 +38,66 @@ impl BoundDatagram {
     pub(super) fn bound_port(&self) -> &BoundUdpPort {
         self.bound_socket.bound_port()
     }
+
+    pub(super) fn try_recv(
+        &mut self,
+        writer: &mut dyn MultiWrite,
+        flags: RecvFlags,
+    ) -> Result<(RecvOutput, IpEndpoint)> {
+        let result = self
+            .bound_socket
+            .recv(flags.receive_behavior(), |mut packet, endpoint| {
+                let message_len = packet.remain();
+                let copied_res = writer.write(&mut packet);
+                (copied_res, endpoint, message_len)
+            });
+
+        match result {
+            Ok((Ok(copied_len), endpoint, message_len)) => {
+                let output = RecvOutput::new_for_packet(flags, copied_len, message_len);
+                Ok((output, endpoint))
+            }
+            Ok((Err(err), _, _)) => Err(err.into()),
+            Err(RecvError::Exhausted) => {
+                return_errno_with_message!(Errno::EAGAIN, "the receive buffer is empty")
+            }
+        }
+    }
+
+    pub(super) fn try_send(
+        &mut self,
+        reader: &mut dyn MultiRead,
+        remote: &IpEndpoint,
+        _flags: SendFlags,
+    ) -> Result<usize> {
+        let message_len = reader.sum_lens();
+        let result = self.bound_socket.send(message_len, *remote, |mut buffer| {
+            match reader.read(&mut buffer) {
+                Ok(copied_len) => {
+                    debug_assert_eq!(message_len, copied_len);
+                    Ok(())
+                }
+                Err((err, _)) => Err(err),
+            }
+        });
+
+        match result {
+            Ok(()) => Ok(message_len),
+            Err(IoError::NoProgress) => {
+                return_errno_with_message!(Errno::EAGAIN, "the socket buffer is full");
+            }
+            Err(IoError::Copy(err)) => Err(err.into()),
+            Err(IoError::Socket(SendError::Unaddressable)) => {
+                return_errno_with_message!(Errno::EINVAL, "the destination address is invalid");
+            }
+            Err(IoError::Socket(SendError::TooLarge)) => {
+                return_errno_with_message!(Errno::EMSGSIZE, "the message is too large");
+            }
+            Err(IoError::Socket(SendError::NoMemory)) => {
+                return_errno_with_message!(Errno::ENOMEM, "there is no enough memory");
+            }
+        }
+    }
 }
 
 impl datagram_common::Bound for BoundDatagram {
@@ -52,83 +115,17 @@ impl datagram_common::Bound for BoundDatagram {
         self.remote_endpoint = Some(*endpoint)
     }
 
-    fn try_recv(
-        &self,
-        writer: &mut dyn MultiWrite,
-        flags: RecvFlags,
-    ) -> Result<(RecvOutput, Self::Endpoint)> {
-        let result = self
-            .bound_socket
-            .recv(flags.receive_behavior(), |packet, udp_metadata| {
-                let message_len = packet.len();
-                let copied_res = writer
-                    .write(&mut VmReader::from(packet))
-                    .map_err(Into::into);
-                let endpoint = udp_metadata.endpoint;
-                (copied_res, endpoint, message_len)
-            });
-
-        match result {
-            Ok((Ok(copied_len), endpoint, message_len)) => {
-                let output = RecvOutput::new_for_packet(flags, copied_len, message_len);
-                Ok((output, endpoint))
-            }
-            Ok((Err(e), _, _)) => Err(e),
-            Err(RecvError::Exhausted) => {
-                return_errno_with_message!(Errno::EAGAIN, "the receive buffer is empty")
-            }
-            Err(RecvError::Truncated) => {
-                unreachable!("`recv` should never fail with `RecvError::Truncated`")
-            }
-        }
-    }
-
-    fn try_send(
-        &self,
-        reader: &mut dyn MultiRead,
-        remote: &Self::Endpoint,
-        _flags: SendFlags,
-    ) -> Result<usize> {
-        let result = self
-            .bound_socket
-            .send(reader.sum_lens(), *remote, |socket_buffer| {
-                // FIXME: If copy failed, we should not send any packet.
-                // But current smoltcp API seems not to support this behavior.
-                reader
-                    .read(&mut VmWriter::from(socket_buffer))
-                    .inspect_err(|e| {
-                        warn!("unexpected UDP packet {e:#?} will be sent");
-                    })
-                    .map_err(Into::into)
-            });
-
-        match result {
-            Ok(inner) => inner,
-            Err(SendError::TooLarge) => {
-                return_errno_with_message!(Errno::EMSGSIZE, "the message is too large");
-            }
-            Err(SendError::Unaddressable) => {
-                return_errno_with_message!(Errno::EINVAL, "the destination address is invalid");
-            }
-            Err(SendError::BufferFull) => {
-                return_errno_with_message!(Errno::EAGAIN, "the send buffer is full");
-            }
-        }
-    }
-
     fn check_io_events(&self) -> IoEvents {
-        self.bound_socket.raw_with(|socket| {
-            let mut events = IoEvents::empty();
+        let mut events = IoEvents::empty();
 
-            if socket.can_recv() {
-                events |= IoEvents::IN;
-            }
+        if self.bound_socket.can_recv() {
+            events |= IoEvents::IN;
+        }
 
-            if socket.can_send() {
-                events |= IoEvents::OUT;
-            }
+        if self.bound_socket.can_send() {
+            events |= IoEvents::OUT;
+        }
 
-            events
-        })
+        events
     }
 }

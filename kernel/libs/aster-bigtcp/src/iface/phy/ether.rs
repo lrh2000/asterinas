@@ -69,9 +69,18 @@ impl<D: WithDevice, E: Ext> EtherIface<D, E> {
     }
 }
 
-impl<D, E: Ext> IfaceInternal<E> for EtherIface<D, E> {
+impl<D: WithDevice, E: Ext> IfaceInternal<E> for EtherIface<D, E> {
     fn common(&self) -> &IfaceCommon<E> {
         &self.common
+    }
+
+    fn alloc_buffer_to_dst(
+        &self,
+        dst_addr: IpAddress,
+        payload_len: usize,
+    ) -> Result<AllocatedTxPacket, ostd::Error> {
+        self.common
+            .alloc_buffer_to_dst::<D::Device>(dst_addr, payload_len)
     }
 }
 

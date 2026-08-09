@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: MPL-2.0
 
 use aster_bigtcp::{
-    errors::tcp::{IoError, RecvError, SendError},
+    errors::{
+        IoError,
+        tcp::{RecvError, SendError},
+    },
     socket::{NeedIfacePoll, RawTcpSetOption},
     wire::IpEndpoint,
 };

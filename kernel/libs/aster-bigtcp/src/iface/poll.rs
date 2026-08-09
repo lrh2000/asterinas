@@ -4,6 +4,7 @@ use alloc::{sync::Arc, vec::Vec};
 
 use ostd::mm::{Infallible, VmReader};
 use smoltcp::{
+    phy::ChecksumCapabilities,
     storage::SliceLike,
     wire::{
         IPV4_HEADER_LEN, IPV4_MIN_MTU, Icmpv4DstUnreachable, IpAddress, IpProtocol, IpRepr,
@@ -26,7 +27,7 @@ use crate::{
     ext::Ext,
     iface::poll_iface::IsUnicast,
     packet::{ApplicationLayer, NetworkLayer, RxPacket, TransportLayer, TxPacket},
-    socket::{TcpConnectionBg, TcpProcessResult},
+    socket::{TcpConnectionBg, TcpProcessResult, UdpProcessResult},
     socket_table::{ConnectionKey, ListenerKey, SocketTable},
 };
 
@@ -86,7 +87,8 @@ impl<E: Ext> PollContext<'_, E> {
                 }
             };
 
-            if let Some(reply) = self.parse_and_process_ip(phy, packet, ip_version)
+            let checksum_caps = self.iface.context_mut().checksum_caps();
+            if let Some(reply) = self.parse_and_process_ip(phy, packet, ip_version, &checksum_caps)
                 && let Some(tx_packet) = phy.dispatch(reply, self.iface.context_mut())
                 && let Err(err) = device.send(tx_packet)
             {
@@ -100,9 +102,9 @@ impl<E: Ext> PollContext<'_, E> {
         phy: &dyn PollPhy,
         packet: RxPacket<NetworkLayer>,
         ip_version: Option<ip::Version>,
+        checksum_caps: &ChecksumCapabilities,
     ) -> Option<TxPacketWithDst> {
         // Parse the IP header. Ignore the packet if the header is ill-formed.
-        let checksum_caps = self.iface.context().checksum_caps();
         let (packet, ip_repr) = ip::parse(packet, ip_version, checksum_caps.ipv4.rx())?;
 
         let can_process = {
@@ -279,7 +281,8 @@ impl<E: Ext> PollContext<'_, E> {
         // Parse the UDP header. Ignore the packet if the header is ill-formed.
         let (packet, udp_repr) = udp::parse(packet, &ip_repr.inner, verify_checksum)?;
 
-        if !self.process_udp(&ip_repr.inner, &udp_repr, packet.reader().into()) {
+        let result = self.process_udp(&ip_repr.inner, &udp_repr, packet);
+        if let UdpProcessResult::NotProcessed(packet) = result {
             return self.generate_icmp_unreachable(
                 phy,
                 &ip_repr.inner,
@@ -295,28 +298,31 @@ impl<E: Ext> PollContext<'_, E> {
         &mut self,
         ip_repr: &IpRepr,
         udp_repr: &UdpRepr,
-        udp_payload: PacketSlice<'_>,
-    ) -> bool {
+        mut udp_payload: RxPacket<ApplicationLayer>,
+    ) -> UdpProcessResult {
         let mut processed = false;
-        let is_unicast = self.iface.context().is_unicast(ip_repr.dst_addr());
 
         for socket in self.sockets.udp_socket_iter() {
             if !socket.can_process(udp_repr.dst_port) {
                 continue;
             }
 
-            processed |= socket.process(
-                self.iface.context_mut(),
-                ip_repr,
-                udp_repr,
-                udp_payload.clone(),
-            );
-            if processed && is_unicast {
-                break;
-            }
+            let result = socket.process(self.iface.context_mut(), ip_repr, udp_repr, udp_payload);
+            udp_payload = match result {
+                UdpProcessResult::NotProcessed(packet) => packet,
+                UdpProcessResult::Processed => return UdpProcessResult::Processed,
+                UdpProcessResult::ProcessedContinue(packet) => {
+                    processed = true;
+                    packet
+                }
+            };
         }
 
-        processed
+        if processed {
+            UdpProcessResult::Processed
+        } else {
+            UdpProcessResult::NotProcessed(udp_payload)
+        }
     }
 
     fn generate_icmp_unreachable(
@@ -403,28 +409,6 @@ impl<E: Ext> PollContext<'_, E> {
         })
     }
 
-    fn emit_udp(
-        &self,
-        phy: &dyn PollPhy,
-        ip_repr: &IpRepr,
-        udp_repr: &UdpRepr,
-        payload: &[u8],
-    ) -> Option<TxPacketWithDst> {
-        let checksum_caps = self.iface.context().checksum_caps();
-
-        let packet = Self::copy_payload(phy, payload)?;
-        let packet = udp::emit(packet, ip_repr, udp_repr, checksum_caps.udp.tx());
-        let packet = ip::emit(packet, ip_repr, checksum_caps.ipv4.tx());
-
-        let mut dst_addr = ip_repr.dst_addr();
-        if !self.iface.context().is_unicast(dst_addr) {
-            // Force the link layer to emit a broadcast link-layer address.
-            dst_addr = IpAddress::Ipv4(Ipv4Address::BROADCAST);
-        }
-
-        Some(TxPacketWithDst { packet, dst_addr })
-    }
-
     fn copy_payload(phy: &dyn PollPhy, payload: &[u8]) -> Option<TxPacket<ApplicationLayer>> {
         let mut builder = match phy.alloc_tx_buffer(payload.len()) {
             Ok(buffer) => buffer.to_builder(),
@@ -444,8 +428,16 @@ impl<E: Ext> PollContext<'_, E> {
 
 impl<E: Ext> PollContext<'_, E> {
     pub(super) fn poll_egress(&mut self, device: &mut dyn AnyNetworkDevice, phy: &dyn PollPhy) {
+        self.dispatch_tcp(device, phy);
+
+        self.dispatch_udp_local(phy);
+
+        self.dispatch_udp_out(device, phy);
+    }
+
+    fn dispatch_tcp(&mut self, device: &mut dyn AnyNetworkDevice, phy: &dyn PollPhy) {
         while device.can_send() {
-            let (did_something, packet) = self.dispatch_ip(phy);
+            let (did_something, packet) = self.do_dispatch_tcp(phy);
 
             if let Some(packet) = packet
                 && let Some(tx_packet) = phy.dispatch(packet, self.iface.context_mut())
@@ -461,19 +453,7 @@ impl<E: Ext> PollContext<'_, E> {
         }
     }
 
-    fn dispatch_ip(&mut self, phy: &dyn PollPhy) -> (bool, Option<TxPacketWithDst>) {
-        let (did_something_tcp, tx_packet) = self.dispatch_tcp(phy);
-
-        if tx_packet.is_some() {
-            return (did_something_tcp, tx_packet);
-        }
-
-        let (did_something_udp, tx_packet) = self.dispatch_udp(phy);
-
-        (did_something_tcp || did_something_udp, tx_packet)
-    }
-
-    fn dispatch_tcp(&mut self, phy: &dyn PollPhy) -> (bool, Option<TxPacketWithDst>) {
+    fn do_dispatch_tcp(&mut self, phy: &dyn PollPhy) -> (bool, Option<TxPacketWithDst>) {
         let mut tx_packet = None;
         let mut did_something = false;
 
@@ -557,63 +537,40 @@ impl<E: Ext> PollContext<'_, E> {
         (did_something, tx_packet)
     }
 
-    fn dispatch_udp(&mut self, phy: &dyn PollPhy) -> (bool, Option<TxPacketWithDst>) {
-        let mut tx_packet = None;
-        let mut did_something = false;
+    fn dispatch_udp_local(&mut self, phy: &dyn PollPhy) {
+        while let Some(packet) = self.iface.pop_pending_udp_local() {
+            self.parse_and_process_ip(
+                phy,
+                packet.to_rx_packet(),
+                None,
+                &ChecksumCapabilities::ignored(),
+            );
+        }
+    }
 
-        let mut actions = Vec::new();
+    fn dispatch_udp_out(&mut self, device: &mut dyn AnyNetworkDevice, phy: &dyn PollPhy) {
+        while device.can_send() {
+            let Some(mut packet) = self.iface.pop_pending_udp_out() else {
+                break;
+            };
 
-        for socket in self.sockets.udp_socket_iter() {
-            if !socket.need_dispatch() {
-                continue;
+            if self.iface.context().is_broadcast(&packet.dst_addr)
+                && let Ok(rx_packet) = packet.packet.clone_rx_packet()
+            {
+                self.parse_and_process_ip(phy, rx_packet, None, &ChecksumCapabilities::ignored());
             }
 
-            // We set `did_something` even if no packets are actually generated. This is because a
-            // timer can expire, but no packets are actually generated.
-            did_something = true;
-
-            let mut deferred = None;
-
-            let (cx, pending) = self.iface.inner_mut();
-            socket.dispatch(cx, |cx, ip_repr, udp_repr, udp_payload| {
-                let iface = PollableIfaceMut::new(cx, pending);
-                let mut this = PollContext::new(iface, self.sockets, &mut actions);
-
-                let is_broadcast = this.iface.context().is_broadcast(&ip_repr.dst_addr());
-                if is_broadcast || !this.iface.context().is_unicast_local(ip_repr.dst_addr()) {
-                    tx_packet = this.emit_udp(phy, ip_repr, udp_repr, udp_payload);
-                    if !is_broadcast {
-                        return;
-                    }
-                }
-
-                if !socket.can_process(udp_repr.dst_port) {
-                    // TODO: Generate the ICMP message here once we're able to handle incoming ICMP
-                    // messages.
-                    let _ = this.process_udp(ip_repr, udp_repr, PacketSlice::from(udp_payload));
-                    return;
-                }
-
-                // We cannot call `process_udp` now because it may cause deadlocks. We will copy
-                // the payload and call `process_udp` after releasing the socket lock.
-                deferred = Some((ip_repr.clone(), *udp_repr, udp_payload.to_vec()));
-            });
-
-            if let Some((ip_repr, udp_repr, payload)) = deferred {
-                let _ =
-                    self.process_udp(&ip_repr, &udp_repr, PacketSlice::from(payload.as_slice()));
+            if self.iface.context().is_broadcast(&packet.dst_addr) {
+                // Force the link layer to emit a broadcast link-layer address.
+                packet.dst_addr = IpAddress::Ipv4(Ipv4Address::BROADCAST);
             }
 
-            if tx_packet.is_some() {
+            if let Some(tx_packet) = phy.dispatch(packet, self.iface.context_mut())
+                && let Err(err) = device.send(tx_packet)
+            {
+                ostd::error!("failed to send a network packet: {:?}", err);
                 break;
             }
         }
-
-        // `actions` should be empty,
-        // because we are dealing with UDP sockets,
-        // and the `actions` contains only TCP actions.
-        debug_assert!(actions.is_empty());
-
-        (did_something, tx_packet)
     }
 }

@@ -9,22 +9,24 @@ pub enum BindError {
     InUse,
 }
 
-pub mod tcp {
-    /// An error returned by a TCP stream I/O operation before any byte is transferred.
+/// An error returned by an I/O operation before any byte is transferred.
+///
+/// If some bytes are transferred before a socket or copy error is observed, the
+/// operation succeeds with the transferred byte count instead.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IoError<SocketError, CopyError> {
+    /// The operation made no progress.
     ///
-    /// If some bytes are transferred before a socket or copy error is observed, the
-    /// operation succeeds with the transferred byte count instead.
-    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-    pub enum IoError<SocketError, CopyError> {
-        /// The operation made no progress.
-        ///
-        /// This usually means the send buffer is full or the receive buffer is empty.
-        NoProgress,
-        /// The underlying TCP socket failed the operation.
-        Socket(SocketError),
-        /// The caller-provided copy function failed.
-        Copy(CopyError),
-    }
+    /// This usually means the send buffer is full or the receive buffer is empty.
+    NoProgress,
+    /// The underlying TCP socket failed the operation.
+    Socket(SocketError),
+    /// The caller-provided copy function failed.
+    Copy(CopyError),
+}
+
+pub mod tcp {
+    use super::IoError;
 
     /// An error returned by [`TcpListener::new_listen`].
     ///
@@ -118,25 +120,23 @@ pub mod tcp {
 }
 
 pub mod udp {
-    pub use smoltcp::socket::udp::RecvError;
-
     /// An error returned by [`UdpSocket::send`].
     ///
     /// [`UdpSocket::send`]: crate::socket::UdpSocket::send
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     pub enum SendError {
         Unaddressable,
-        BufferFull,
         /// The packet is too large.
         TooLarge,
+        /// Memory is not enough.
+        NoMemory,
     }
 
-    impl From<smoltcp::socket::udp::SendError> for SendError {
-        fn from(value: smoltcp::socket::udp::SendError) -> Self {
-            match value {
-                smoltcp::socket::udp::SendError::Unaddressable => Self::Unaddressable,
-                smoltcp::socket::udp::SendError::BufferFull => Self::BufferFull,
-            }
-        }
+    /// An error returned by [`UdpSocket::recv`].
+    ///
+    /// [`UdpSocket::recv`]: crate::socket::UdpSocket::recv
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum RecvError {
+        Exhausted,
     }
 }

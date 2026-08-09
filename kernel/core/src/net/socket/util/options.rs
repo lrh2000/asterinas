@@ -7,7 +7,7 @@ use core::{
 };
 
 use aster_bigtcp::socket::{
-    NeedIfacePoll, TCP_RECV_BUF_LEN, TCP_SEND_BUF_LEN, UDP_RECV_PAYLOAD_LEN, UDP_SEND_PAYLOAD_LEN,
+    NeedIfacePoll, TCP_RECV_BUF_LEN, TCP_SEND_BUF_LEN, UDP_RECV_BUF_LEN, UDP_SEND_BUF_LEN,
 };
 
 use super::{LingerOption, SocketTimeout};
@@ -72,8 +72,8 @@ impl SocketOptionSet {
     /// Returns the default socket level options for udp socket.
     pub(in crate::net) fn new_udp() -> Self {
         Self {
-            send_buf: UDP_SEND_PAYLOAD_LEN as u32,
-            recv_buf: UDP_RECV_PAYLOAD_LEN as u32,
+            send_buf: UDP_SEND_BUF_LEN as u32,
+            recv_buf: UDP_RECV_BUF_LEN as u32,
             ..Default::default()
         }
     }

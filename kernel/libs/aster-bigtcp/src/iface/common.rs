@@ -16,7 +16,8 @@ use int_to_c_enum::TryFromInt;
 use ostd::sync::{SpinLock, SpinLockGuard};
 use smoltcp::{
     iface::Context,
-    wire::{IpAddress, IpEndpoint, Ipv4Cidr, Ipv6Address, Ipv6Cidr},
+    phy::ChecksumCapabilities,
+    wire::{IpAddress, IpEndpoint, IpRepr, Ipv4Cidr, Ipv6Address, Ipv6Cidr, UdpRepr},
 };
 
 use super::{
@@ -30,8 +31,12 @@ use crate::{
     device::{AnyNetworkDevice, WithDevice},
     errors::BindError,
     ext::Ext,
-    iface::ScheduleNextPoll,
-    packet::{AllocatedTxPacket, LinkLayer, NetworkLayer, RxPacket, TxPacket},
+    iface::{
+        ScheduleNextPoll,
+        poll_iface::IsUnicast,
+        wire::{ip, udp},
+    },
+    packet::{AllocatedTxPacket, ApplicationLayer, LinkLayer, NetworkLayer, RxPacket, TxPacket},
     socket::{TcpListenerBg, UdpSocketBg},
     socket_table::SocketTable,
 };
@@ -235,6 +240,36 @@ impl<E: Ext> IfaceCommon<E> {
         let removed = sockets.remove_udp_socket(socket);
         debug_assert!(removed.is_some());
     }
+
+    pub(crate) fn enqueue_udp_packet(
+        &self,
+        socket: &Arc<UdpSocketBg<E>>,
+        ip_repr: &IpRepr,
+        udp_repr: &UdpRepr,
+        udp_payload: TxPacket<ApplicationLayer>,
+    ) {
+        let mut interface = self.interface();
+
+        let is_unicast_local = interface.context_mut().is_unicast_local(ip_repr.dst_addr());
+        let checksum_caps = if !is_unicast_local {
+            interface.context_mut().checksum_caps()
+        } else {
+            ChecksumCapabilities::ignored()
+        };
+
+        let packet = udp::emit(udp_payload, ip_repr, udp_repr, checksum_caps.udp.tx());
+        let packet = ip::emit(packet, ip_repr, checksum_caps.ipv4.tx());
+
+        if is_unicast_local {
+            interface.enqueue_udp_local(socket.clone(), packet);
+        } else {
+            let packet = TxPacketWithDst {
+                packet,
+                dst_addr: ip_repr.dst_addr(),
+            };
+            interface.enqueue_udp_out(socket.clone(), packet);
+        }
+    }
 }
 
 impl<E: Ext> IfaceCommon<E> {
@@ -275,6 +310,19 @@ impl<E: Ext> IfaceCommon<E> {
         // Note that only TCP connections can have timers set, so as far as the time to poll is
         // concerned, we only need to consider TCP connections.
         interface.next_poll_at_ms()
+    }
+
+    pub(super) fn alloc_buffer_to_dst<D: AnyNetworkDevice>(
+        &self,
+        dst_addr: IpAddress,
+        payload_len: usize,
+    ) -> Result<AllocatedTxPacket, ostd::Error> {
+        let is_unicast_local = self.interface().context_mut().is_unicast_local(dst_addr);
+        if is_unicast_local {
+            AllocatedTxPacket::new(payload_len)
+        } else {
+            D::alloc_tx_buffer(payload_len)
+        }
     }
 }
 

@@ -106,12 +106,22 @@ impl<E: Ext> dyn Iface<E> {
 }
 
 pub(super) mod internal {
-    use crate::{ext::Ext, iface::common::IfaceCommon};
+    use smoltcp::wire::IpAddress;
+
+    use crate::{ext::Ext, iface::common::IfaceCommon, packet::AllocatedTxPacket};
 
     /// An internal trait that abstracts the common part of different ifaces.
     pub trait IfaceInternal<E> {
         fn common(&self) -> &IfaceCommon<E>
         where
             E: Ext;
+
+        /// Allocates a packet buffer for transmission through this iface to the specified
+        /// destination address.
+        fn alloc_buffer_to_dst(
+            &self,
+            dst_addr: IpAddress,
+            payload_len: usize,
+        ) -> Result<AllocatedTxPacket, ostd::Error>;
     }
 }

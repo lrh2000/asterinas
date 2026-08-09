@@ -24,7 +24,10 @@ use super::{
 };
 use crate::{
     define_boolean_value,
-    errors::tcp::{ConnectError, IoError, RecvError, SendError},
+    errors::{
+        IoError,
+        tcp::{ConnectError, RecvError, SendError},
+    },
     ext::Ext,
     iface::{BoundTcpPort, PacketSlice, PollKey, PollableIfaceMut},
     socket::{

@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use alloc::{collections::btree_set::BTreeSet, sync::Arc};
+use alloc::{
+    collections::{btree_set::BTreeSet, vec_deque::VecDeque},
+    sync::Arc,
+};
 use core::{
     borrow::Borrow,
     sync::atomic::{AtomicU64, Ordering},
@@ -8,7 +11,9 @@ use core::{
 
 use crate::{
     ext::Ext,
-    socket::{NeedIfacePoll, TcpConnectionBg},
+    iface::common::TxPacketWithDst,
+    packet::{NetworkLayer, TxPacket},
+    socket::{NeedIfacePoll, TcpConnectionBg, UdpSocketBg},
 };
 
 /// An interface with auxiliary data that makes it pollable.
@@ -58,6 +63,18 @@ impl<E: Ext> PollableIface<E> {
     /// Returns the next poll time.
     pub(super) fn next_poll_at_ms(&self) -> Option<u64> {
         self.pending.next_poll_at_ms()
+    }
+
+    pub(super) fn enqueue_udp_local(
+        &mut self,
+        socket: Arc<UdpSocketBg<E>>,
+        pkt: TxPacket<NetworkLayer>,
+    ) {
+        self.pending.udp_local.push_back((socket, pkt));
+    }
+
+    pub(super) fn enqueue_udp_out(&mut self, socket: Arc<UdpSocketBg<E>>, pkt: TxPacketWithDst) {
+        self.pending.udp_out.push_back((socket, pkt));
     }
 }
 
@@ -110,6 +127,18 @@ impl<E: Ext> PollableIfaceMut<'_, E> {
     pub(super) fn pop_pending_tcp(&mut self) -> Option<Arc<TcpConnectionBg<E>>> {
         let now = self.context.now.total_millis() as u64;
         self.pending.pop_tcp_before_now(now)
+    }
+
+    pub(super) fn pop_pending_udp_local(&mut self) -> Option<TxPacket<NetworkLayer>> {
+        let (socket, packet) = self.pending.udp_local.pop_front()?;
+        socket.release_send_buffer(packet.memory_usage());
+        Some(packet)
+    }
+
+    pub(super) fn pop_pending_udp_out(&mut self) -> Option<TxPacketWithDst> {
+        let (socket, packet) = self.pending.udp_out.pop_front()?;
+        socket.release_send_buffer(packet.packet.memory_usage());
+        Some(packet)
     }
 }
 
@@ -199,8 +228,19 @@ impl PollKey {
 ///
 /// For TCP sockets, they're recorded here if they have actions to be done in future polls. The
 /// recorded sockets are sorted by poll time.
+///
+/// For UDP sockets, they're recorded with the UDP packets to be sent in the next poll.
 pub(crate) struct PendingSet<E: Ext> {
     tcp: BTreeSet<PendingTcpConn<E>>,
+
+    /// UDP packets that are only sent to local addresses.
+    ///
+    /// For those packets, checksum computation and verification are skipped.
+    udp_local: VecDeque<(Arc<UdpSocketBg<E>>, TxPacket<NetworkLayer>)>,
+    /// UDP packets that may be sent to remote addresses.
+    ///
+    /// For those packets, checksum computation and verification follow the interface configs.
+    udp_out: VecDeque<(Arc<UdpSocketBg<E>>, TxPacketWithDst)>,
 }
 
 /// A TCP socket to poll in the future.
@@ -233,6 +273,8 @@ impl<E: Ext> PendingSet<E> {
     fn new() -> Self {
         Self {
             tcp: BTreeSet::new(),
+            udp_local: VecDeque::new(),
+            udp_out: VecDeque::new(),
         }
     }
 
