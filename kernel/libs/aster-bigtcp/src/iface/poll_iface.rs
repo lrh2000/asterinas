@@ -17,21 +17,21 @@ use crate::{
 /// poll.
 pub(crate) struct PollableIface<E: Ext> {
     interface: smoltcp::iface::Interface,
-    pending_conns: PendingConnSet<E>,
+    pending: PendingSet<E>,
 }
 
 impl<E: Ext> PollableIface<E> {
     pub(super) fn new(interface: smoltcp::iface::Interface) -> Self {
         Self {
             interface,
-            pending_conns: PendingConnSet::new(),
+            pending: PendingSet::new(),
         }
     }
 
     pub(super) fn as_mut(&mut self) -> PollableIfaceMut<'_, E> {
         PollableIfaceMut {
             context: self.interface.context(),
-            pending_conns: &mut self.pending_conns,
+            pending: &mut self.pending,
         }
     }
 
@@ -57,7 +57,7 @@ impl<E: Ext> PollableIface<E> {
 
     /// Returns the next poll time.
     pub(super) fn next_poll_at_ms(&self) -> Option<u64> {
-        self.pending_conns.next_poll_at_ms()
+        self.pending.next_poll_at_ms()
     }
 }
 
@@ -76,7 +76,7 @@ impl<E: Ext> PollableIface<E> {
         socket: &Arc<TcpConnectionBg<E>>,
         poll_at: smoltcp::socket::PollAt,
     ) -> NeedIfacePoll {
-        self.pending_conns.update_next_poll_at_ms(socket, poll_at)
+        self.pending.update_next_poll_at_ms(socket, poll_at)
     }
 }
 
@@ -87,7 +87,7 @@ impl<E: Ext> PollableIface<E> {
 /// [`smoltcp`] APIs.
 pub(crate) struct PollableIfaceMut<'a, E: Ext> {
     context: &'a mut smoltcp::iface::Context,
-    pending_conns: &'a mut PendingConnSet<E>,
+    pending: &'a mut PendingSet<E>,
 }
 
 // FIXME: We provide `new()` and `inner_mut()` as `pub(crate)` methods because it's necessary to
@@ -96,23 +96,20 @@ pub(crate) struct PollableIfaceMut<'a, E: Ext> {
 impl<'a, E: Ext> PollableIfaceMut<'a, E> {
     pub(crate) fn new(
         context: &'a mut smoltcp::iface::Context,
-        pending_conns: &'a mut PendingConnSet<E>,
+        pending: &'a mut PendingSet<E>,
     ) -> Self {
-        Self {
-            context,
-            pending_conns,
-        }
+        Self { context, pending }
     }
 
-    pub(crate) fn inner_mut(&mut self) -> (&mut smoltcp::iface::Context, &mut PendingConnSet<E>) {
-        (self.context, self.pending_conns)
+    pub(crate) fn inner_mut(&mut self) -> (&mut smoltcp::iface::Context, &mut PendingSet<E>) {
+        (self.context, self.pending)
     }
 }
 
 impl<E: Ext> PollableIfaceMut<'_, E> {
     pub(super) fn pop_pending_tcp(&mut self) -> Option<Arc<TcpConnectionBg<E>>> {
         let now = self.context.now.total_millis() as u64;
-        self.pending_conns.pop_tcp_before_now(now)
+        self.pending.pop_tcp_before_now(now)
     }
 }
 
@@ -136,7 +133,7 @@ impl<E: Ext> PollableIfaceMut<'_, E> {
         socket: &Arc<TcpConnectionBg<E>>,
         poll_at: smoltcp::socket::PollAt,
     ) -> NeedIfacePoll {
-        self.pending_conns.update_next_poll_at_ms(socket, poll_at)
+        self.pending.update_next_poll_at_ms(socket, poll_at)
     }
 }
 
@@ -198,13 +195,15 @@ impl PollKey {
     }
 }
 
-/// Sockets to poll in the future, sorted by poll time.
-pub(crate) struct PendingConnSet<E: Ext>(BTreeSet<PendingTcpConn<E>>);
+/// Socket actions to be carried out in the next poll or at a later time.
+///
+/// For TCP sockets, they're recorded here if they have actions to be done in future polls. The
+/// recorded sockets are sorted by poll time.
+pub(crate) struct PendingSet<E: Ext> {
+    tcp: BTreeSet<PendingTcpConn<E>>,
+}
 
 /// A TCP socket to poll in the future.
-///
-/// Note that currently only TCP sockets can set a timer to fire in the future, so a
-/// [`PendingConnSet`] contains only [`PendingTcpConn`]s.
 struct PendingTcpConn<E: Ext>(Arc<TcpConnectionBg<E>>);
 
 impl<E: Ext> PartialEq for PendingTcpConn<E> {
@@ -230,9 +229,11 @@ impl<E: Ext> Borrow<PollKey> for PendingTcpConn<E> {
     }
 }
 
-impl<E: Ext> PendingConnSet<E> {
+impl<E: Ext> PendingSet<E> {
     fn new() -> Self {
-        Self(BTreeSet::new())
+        Self {
+            tcp: BTreeSet::new(),
+        }
     }
 
     fn update_next_poll_at_ms(
@@ -256,7 +257,7 @@ impl<E: Ext> PendingConnSet<E> {
 
         // Remove the socket from the pending queue if it is in the queue.
         let owned_socket = if old_poll_at_ms != PollKey::INACTIVE_VAL {
-            self.0.take(key).unwrap()
+            self.tcp.take(key).unwrap()
         } else {
             PendingTcpConn(socket.clone())
         };
@@ -270,7 +271,7 @@ impl<E: Ext> PendingConnSet<E> {
         }
 
         // Add the socket back to the queue.
-        let inserted = self.0.insert(owned_socket);
+        let inserted = self.tcp.insert(owned_socket);
         debug_assert!(inserted);
 
         if new_poll_at_ms < old_poll_at_ms {
@@ -281,10 +282,10 @@ impl<E: Ext> PendingConnSet<E> {
     }
 
     fn pop_tcp_before_now(&mut self, now_at_ms: u64) -> Option<Arc<TcpConnectionBg<E>>> {
-        if self.0.first().is_some_and(|first| {
+        if self.tcp.first().is_some_and(|first| {
             first.0.poll_key().next_poll_at_ms.load(Ordering::Relaxed) <= now_at_ms
         }) {
-            self.0.pop_first().map(|first| {
+            self.tcp.pop_first().map(|first| {
                 // Reset `next_poll_at_ms` since the socket is no longer in the queue.
                 first
                     .0
@@ -299,7 +300,7 @@ impl<E: Ext> PendingConnSet<E> {
     }
 
     fn next_poll_at_ms(&self) -> Option<u64> {
-        self.0
+        self.tcp
             .first()
             .map(|first| first.0.poll_key().next_poll_at_ms.load(Ordering::Relaxed))
     }
