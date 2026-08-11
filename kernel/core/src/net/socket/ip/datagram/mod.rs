@@ -18,7 +18,7 @@ use crate::{
             private::SocketPrivate,
             util::{
                 MessageHeader, RecvFlags, RecvOutput, SendFlags, SocketAddr,
-                datagram_common::{Bound, Inner, select_remote_and_bind},
+                datagram_common::{Bound, Inner, select_remote_and_bind_mut},
                 options::{
                     GetSocketLevelOption, SetSocketLevelOption, SocketOptionSet, SocketTimeouts,
                 },
@@ -36,7 +36,7 @@ mod unbound;
 
 pub(crate) struct DatagramSocket {
     // Lock order: `inner` first, `options` second
-    inner: RwMutex<Inner<UnboundDatagram, BoundDatagram>>,
+    inner: Mutex<Inner<UnboundDatagram, BoundDatagram>>,
     options: RwLock<OptionSet>,
     timeouts: SocketTimeouts,
 
@@ -63,7 +63,7 @@ impl DatagramSocket {
     pub(crate) fn new(is_nonblocking: bool) -> Arc<Self> {
         let unbound_datagram = UnboundDatagram::new();
         Arc::new(Self {
-            inner: RwMutex::new(Inner::Unbound(unbound_datagram)),
+            inner: Mutex::new(Inner::Unbound(unbound_datagram)),
             options: RwLock::new(OptionSet::new()),
             timeouts: SocketTimeouts::new(),
             pollee: Pollee::new(),
@@ -78,7 +78,7 @@ impl DatagramSocket {
     ) -> Result<(RecvOutput, SocketAddr)> {
         let result = self
             .inner
-            .read()
+            .lock()
             .try_recv(writer, flags)
             .map(|(output, remote_endpoint)| (output, remote_endpoint.into()))?;
         self.pollee.invalidate();
@@ -92,19 +92,17 @@ impl DatagramSocket {
         remote: Option<&IpEndpoint>,
         flags: SendFlags,
     ) -> Result<usize> {
-        let (sent_bytes, iface_to_poll) = select_remote_and_bind(
-            &self.inner,
+        let (sent_bytes, iface_to_poll) = select_remote_and_bind_mut(
+            &mut *self.inner.lock(),
             remote,
-            || {
+            |inner| {
                 let remote_endpoint = remote.ok_or_else(|| {
                     Error::with_message(
                         Errno::EDESTADDRREQ,
                         "the destination address is not specified",
                     )
                 })?;
-                self.inner
-                    .write()
-                    .bind_ephemeral(remote_endpoint, &self.pollee)
+                inner.bind_ephemeral(remote_endpoint, &self.pollee)
             },
             |bound_datagram, remote_endpoint| {
                 let sent_bytes = bound_datagram.try_send(reader, remote_endpoint, flags)?;
@@ -123,7 +121,7 @@ impl DatagramSocket {
 impl Pollable for DatagramSocket {
     fn poll(&self, mask: IoEvents, poller: Option<&mut PollHandle>) -> IoEvents {
         self.pollee
-            .poll_with(mask, poller, || self.inner.read().check_io_events())
+            .poll_with(mask, poller, || self.inner.lock().check_io_events())
     }
 }
 
@@ -147,7 +145,7 @@ impl Socket for DatagramSocket {
         let can_reuse = self.options.read().socket.reuse_addr();
 
         self.inner
-            .write()
+            .lock()
             .bind(&endpoint, &self.pollee, BindOptions { can_reuse })
     }
 
@@ -161,13 +159,13 @@ impl Socket for DatagramSocket {
             );
         }
 
-        self.inner.write().connect(&endpoint, &self.pollee)
+        self.inner.lock().connect(&endpoint, &self.pollee)
     }
 
     fn addr(&self) -> Result<SocketAddr> {
         let endpoint = self
             .inner
-            .read()
+            .lock()
             .addr()
             .unwrap_or(UNSPECIFIED_LOCAL_ENDPOINT);
 
@@ -176,7 +174,7 @@ impl Socket for DatagramSocket {
 
     fn peer_addr(&self) -> Result<SocketAddr> {
         let endpoint =
-            *self.inner.read().peer_addr().ok_or_else(|| {
+            *self.inner.lock().peer_addr().ok_or_else(|| {
                 Error::with_message(Errno::ENOTCONN, "the socket is not connected")
             })?;
 
@@ -255,7 +253,7 @@ impl Socket for DatagramSocket {
             _ => (),
         });
 
-        let inner = self.inner.read();
+        let inner = self.inner.lock();
         let options = self.options.read();
 
         // Deal with socket-level options
@@ -272,7 +270,7 @@ impl Socket for DatagramSocket {
     }
 
     fn set_option(&self, option: &dyn SocketOption) -> Result<()> {
-        let inner = self.inner.read();
+        let inner = self.inner.lock();
         let mut options = self.options.write();
 
         // Deal with socket-level options

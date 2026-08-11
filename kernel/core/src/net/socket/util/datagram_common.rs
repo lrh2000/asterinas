@@ -108,9 +108,7 @@ where
 
         let bound_datagram = match self {
             Inner::Unbound(_) => {
-                unreachable!(
-                    "`bind_to_ephemeral_endpoint` succeeds so the socket cannot be unbound"
-                );
+                unreachable!("`bind_to_ephemeral` succeeds so the socket cannot be unbound");
             }
             Inner::Bound(bound_datagram) => bound_datagram,
         };
@@ -184,13 +182,10 @@ where
 {
     let mut inner = inner_mutex.read();
 
-    // Not really a loop, since we always break on the first iteration. But we need to use
-    // `loop` here because we want to use `break` later.
-    #[expect(clippy::never_loop)]
-    let bound_datagram = loop {
+    let bound_datagram = 'out: {
         // Fast path: The socket is already bound.
         if let Inner::Bound(bound_datagram) = &*inner {
-            break bound_datagram;
+            break 'out bound_datagram;
         }
 
         // Slow path: Try to bind the socket to an ephemeral endpoint.
@@ -199,10 +194,10 @@ where
         inner = inner_mutex.read();
 
         // Now the socket must be bound.
-        if let Inner::Bound(bound_datagram) = &*inner {
-            break bound_datagram;
-        }
-        unreachable!("`try_bind_ephemeral` succeeds so the socket cannot be unbound");
+        let Inner::Bound(bound_datagram) = &*inner else {
+            unreachable!("`bind_ephemeral` succeeds so the socket cannot be unbound");
+        };
+        bound_datagram
     };
 
     let remote_endpoint = remote
@@ -215,4 +210,42 @@ where
         })?;
 
     op(bound_datagram, remote_endpoint)
+}
+
+/// Selects the remote endpoint and binds if the socket is not bound.
+///
+/// This is the same as [`select_remote_and_bind`], except that this method does not assume that
+/// [`Inner`] is protected in an [`RwMutex`].
+pub(crate) fn select_remote_and_bind_mut<UnboundSocket, BoundSocket, B, F, R>(
+    inner: &mut Inner<UnboundSocket, BoundSocket>,
+    remote: Option<&UnboundSocket::Endpoint>,
+    bind_ephemeral: B,
+    op: F,
+) -> Result<R>
+where
+    UnboundSocket: Unbound<Endpoint = BoundSocket::Endpoint, Bound = BoundSocket>,
+    BoundSocket: Bound,
+    BoundSocket::Endpoint: Clone,
+    B: FnOnce(&mut Inner<UnboundSocket, BoundSocket>) -> Result<()>,
+    F: FnOnce(&mut BoundSocket, &UnboundSocket::Endpoint) -> Result<R>,
+{
+    if matches!(&*inner, Inner::Unbound(_)) {
+        bind_ephemeral(&mut *inner)?;
+    }
+
+    let Inner::Bound(bound_datagram) = inner else {
+        unreachable!("`bind_ephemeral` succeeds so the socket cannot be unbound");
+    };
+
+    let remote_endpoint = remote
+        .cloned()
+        .or_else(|| bound_datagram.remote_endpoint().cloned())
+        .ok_or_else(|| {
+            Error::with_message(
+                Errno::EDESTADDRREQ,
+                "the destination address is not specified",
+            )
+        })?;
+
+    op(bound_datagram, &remote_endpoint)
 }
