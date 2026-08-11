@@ -18,7 +18,7 @@ use crate::{
         private::SocketPrivate,
         util::{
             MessageHeader, RecvFlags, RecvOutput, SendFlags, SocketAddr,
-            datagram_common::{Bound, Inner, select_remote_and_bind},
+            datagram_common::{Bound, Inner, SendRecv, select_remote_and_bind},
             options::{
                 GetSocketLevelOption, SetSocketLevelOption, SocketOptionSet, SocketTimeouts,
             },
@@ -57,7 +57,7 @@ impl OptionSet {
 
 impl<P: SupportedNetlinkProtocol> NetlinkSocket<P>
 where
-    BoundNetlink<P::Message>: Bound<Endpoint = NetlinkSocketAddr>,
+    BoundNetlink<P::Message>: SendRecv<Endpoint = NetlinkSocketAddr>,
 {
     pub(crate) fn new(is_nonblocking: bool, socket_type: SockType) -> Arc<Self> {
         debug_assert!(socket_type == SockType::SOCK_RAW || socket_type == SockType::SOCK_DGRAM);
@@ -113,7 +113,7 @@ where
 
 impl<P: SupportedNetlinkProtocol> Socket for NetlinkSocket<P>
 where
-    BoundNetlink<P::Message>: Bound<Endpoint = NetlinkSocketAddr>,
+    BoundNetlink<P::Message>: SendRecv<Endpoint = NetlinkSocketAddr>,
 {
     fn bind(&self, socket_addr: SocketAddr) -> Result<()> {
         let endpoint = socket_addr.try_into()?;

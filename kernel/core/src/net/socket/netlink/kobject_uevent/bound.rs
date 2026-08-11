@@ -32,6 +32,12 @@ impl datagram_common::Bound for BoundNetlinkUevent {
         self.remote_addr = *endpoint;
     }
 
+    fn check_io_events(&self) -> IoEvents {
+        self.check_io_events_common()
+    }
+}
+
+impl datagram_common::SendRecv for BoundNetlinkUevent {
     fn try_send(
         &self,
         reader: &mut dyn MultiRead,
@@ -77,9 +83,5 @@ impl datagram_common::Bound for BoundNetlinkUevent {
             let output = RecvOutput::new_for_packet(flags, copied_len, response_len);
             Ok((should_dequeue, (output, remote)))
         })
-    }
-
-    fn check_io_events(&self) -> IoEvents {
-        self.check_io_events_common()
     }
 }

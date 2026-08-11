@@ -39,6 +39,10 @@ pub(crate) trait Bound {
     fn remote_endpoint(&self) -> Option<&Self::Endpoint>;
     fn set_remote_endpoint(&mut self, endpoint: &Self::Endpoint);
 
+    fn check_io_events(&self) -> IoEvents;
+}
+
+pub(crate) trait SendRecv: Bound {
     fn try_recv(
         &self,
         writer: &mut dyn MultiWrite,
@@ -50,8 +54,6 @@ pub(crate) trait Bound {
         remote: &Self::Endpoint,
         flags: SendFlags,
     ) -> Result<usize>;
-
-    fn check_io_events(&self) -> IoEvents;
 }
 
 pub(crate) enum Inner<UnboundSocket, BoundSocket> {
@@ -131,6 +133,19 @@ where
         }
     }
 
+    pub(crate) fn check_io_events(&self) -> IoEvents {
+        match self {
+            Inner::Unbound(unbound_datagram) => unbound_datagram.check_io_events(),
+            Inner::Bound(bound_datagram) => bound_datagram.check_io_events(),
+        }
+    }
+}
+
+impl<UnboundSocket, BoundSocket> Inner<UnboundSocket, BoundSocket>
+where
+    UnboundSocket: Unbound<Endpoint = BoundSocket::Endpoint, Bound = BoundSocket>,
+    BoundSocket: SendRecv,
+{
     pub(crate) fn try_recv(
         &self,
         writer: &mut dyn MultiWrite,
@@ -146,13 +161,6 @@ where
 
     // If you're looking for `try_send`, there isn't one. Use `select_remote_and_bind` below and
     // call `Bound::try_send` directly.
-
-    pub(crate) fn check_io_events(&self) -> IoEvents {
-        match self {
-            Inner::Unbound(unbound_datagram) => unbound_datagram.check_io_events(),
-            Inner::Bound(bound_datagram) => bound_datagram.check_io_events(),
-        }
-    }
 }
 
 /// Selects the remote endpoint and binds if the socket is not bound.
