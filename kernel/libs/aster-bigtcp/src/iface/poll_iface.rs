@@ -308,6 +308,12 @@ impl<E: Ext> PendingSet<E> {
 
 /// An extension trait for an interface context.
 pub(super) trait IsUnicast {
+    /// Returns whether the destination address is a unicast address of an interface.
+    ///
+    /// Note: This excludes broadcast addresses, link-local broadcast addresses, and multicast
+    /// addresses.
+    fn is_unicast(&self, dst_addr: smoltcp::wire::IpAddress) -> bool;
+
     /// Returns whether the destination address is a local unicast address of an interface.
     ///
     /// Note: "local" means that the IP address belongs to the local interface, not to be confused
@@ -316,6 +322,10 @@ pub(super) trait IsUnicast {
 }
 
 impl IsUnicast for smoltcp::iface::Context {
+    fn is_unicast(&self, dst_addr: smoltcp::wire::IpAddress) -> bool {
+        !self.is_broadcast(&dst_addr) && !dst_addr.is_multicast()
+    }
+
     fn is_unicast_local(&self, dst_addr: smoltcp::wire::IpAddress) -> bool {
         use smoltcp::wire::IpAddress;
 
