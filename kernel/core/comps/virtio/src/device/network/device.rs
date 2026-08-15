@@ -368,4 +368,4 @@ impl Debug for NetworkDevice {
 const QUEUE_RECV: u16 = 0;
 const QUEUE_SEND: u16 = 1;
 
-const QUEUE_SIZE: u16 = 64;
+const QUEUE_SIZE: u16 = 256;
