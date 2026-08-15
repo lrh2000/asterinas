@@ -23,6 +23,7 @@ use super::{
     },
 };
 use crate::{
+    define_boolean_value,
     device::{AnyNetworkDevice, NetError},
     ext::Ext,
     iface::poll_iface::IsUnicast,
@@ -60,15 +61,28 @@ impl<'a, E: Ext> PollContext<'a, E> {
     }
 }
 
+define_boolean_value!(
+    /// Whether the budget to receive packets has been exhausted.
+    #[must_use]
+    RxBudgetExhausted
+);
+
 impl<E: Ext> PollContext<'_, E> {
-    pub(super) fn poll_ingress(&mut self, device: &mut dyn AnyNetworkDevice, phy: &dyn PollPhy) {
-        loop {
+    pub(super) fn poll_ingress(
+        &mut self,
+        device: &mut dyn AnyNetworkDevice,
+        phy: &dyn PollPhy,
+        mut rx_budget: usize,
+    ) -> RxBudgetExhausted {
+        while rx_budget > 0 {
+            rx_budget -= 1;
+
             let rx_packet = match device.receive() {
                 Ok(packet) => packet,
-                Err(NetError::NotReady) => break,
+                Err(NetError::NotReady) => return RxBudgetExhausted::FALSE,
                 Err(err) => {
                     ostd::error!("failed to receive a network packet: {:?}", err);
-                    break;
+                    return RxBudgetExhausted::FALSE;
                 }
             };
 
@@ -94,6 +108,12 @@ impl<E: Ext> PollContext<'_, E> {
             {
                 ostd::error!("failed to send a network packet: {:?}", err);
             }
+        }
+
+        if device.can_receive() {
+            RxBudgetExhausted::TRUE
+        } else {
+            RxBudgetExhausted::FALSE
         }
     }
 

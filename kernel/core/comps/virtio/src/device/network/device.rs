@@ -187,6 +187,23 @@ impl NetworkDevice {
             .map_err(|_| NetError::NotReady)?;
         debug!("receive packet: token = {}, len = {}", token, len);
 
+        // If the receive queue is not empty,
+        // the caller will poll for new data either immediately or deferred.
+        // Therefore, there is no need for IRQ handlers to notify us of new data.
+        // This allows us to temporarily disable the receive queue interrupt.
+        //
+        // Conversely, if the receive queue is empty,
+        // the receive queue interrupt should remain enabled
+        // so that we can be notified as soon as new data arrives.
+        //
+        // To prevent races, we expect the caller to check `can_receive()` again
+        // to avoid races between a concurrent receive queue interrupt and `enable_callback()`.
+        if self.can_receive() {
+            self.recv_queue.disable_callback();
+        } else {
+            self.recv_queue.enable_callback();
+        }
+
         let rx_buffer = self.rx_buffers.remove(token as usize).unwrap();
 
         let new_rx_buffer = self.new_rx_buffer.take().unwrap();

@@ -33,6 +33,7 @@ use crate::{
     ext::Ext,
     iface::{
         ScheduleNextPoll,
+        poll::RxBudgetExhausted,
         poll_iface::IsUnicast,
         wire::{ip, udp},
     },
@@ -274,16 +275,32 @@ impl<E: Ext> IfaceCommon<E> {
 
 impl<E: Ext> IfaceCommon<E> {
     pub(super) fn poll<D: WithDevice>(&self, driver: &D, phy: &dyn PollPhy) {
-        driver.with(|device| self.do_poll_and_notify(device, phy));
+        driver.with(|device| {
+            let is_rx_exhausted = self.do_poll_and_notify(device, phy, D::RX_BUDGET);
+            if *is_rx_exhausted {
+                D::on_rx_exhausted();
+            }
+        });
     }
 
-    fn do_poll_and_notify(&self, device: &mut dyn AnyNetworkDevice, phy: &dyn PollPhy) {
-        let next_poll = self.do_poll(device, phy);
+    fn do_poll_and_notify(
+        &self,
+        device: &mut dyn AnyNetworkDevice,
+        phy: &dyn PollPhy,
+        rx_budget: usize,
+    ) -> RxBudgetExhausted {
+        let (next_poll, is_rx_exhausted) = self.do_poll(device, phy, rx_budget);
         device.notify_poll_end();
         self.sched_poll.schedule_next_poll(next_poll);
+        is_rx_exhausted
     }
 
-    fn do_poll(&self, device: &mut dyn AnyNetworkDevice, phy: &dyn PollPhy) -> Option<u64> {
+    fn do_poll(
+        &self,
+        device: &mut dyn AnyNetworkDevice,
+        phy: &dyn PollPhy,
+        rx_budget: usize,
+    ) -> (Option<u64>, RxBudgetExhausted) {
         let mut interface = self.interface();
         interface.context_mut().now = get_network_timestamp();
 
@@ -291,7 +308,7 @@ impl<E: Ext> IfaceCommon<E> {
         let mut socket_actions = Vec::new();
 
         let mut context = PollContext::new(interface.as_mut(), &sockets, &mut socket_actions);
-        context.poll_ingress(device, phy);
+        let is_rx_exhausted = context.poll_ingress(device, phy, rx_budget);
         context.poll_egress(device, phy);
 
         // Insert new connections and remove dead connections.
@@ -309,7 +326,7 @@ impl<E: Ext> IfaceCommon<E> {
 
         // Note that only TCP connections can have timers set, so as far as the time to poll is
         // concerned, we only need to consider TCP connections.
-        interface.next_poll_at_ms()
+        (interface.next_poll_at_ms(), is_rx_exhausted)
     }
 
     pub(super) fn alloc_buffer_to_dst<D: AnyNetworkDevice>(

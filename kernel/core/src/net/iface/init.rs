@@ -124,12 +124,18 @@ fn new_virtio() -> Option<Arc<Iface>> {
     impl WithDevice for Wrapper {
         type Device = aster_virtio::device::network::device::NetworkDevice;
 
+        const RX_BUDGET: usize = 32;
+
         fn with<F, R>(&self, f: F) -> R
         where
             F: FnOnce(&mut dyn AnyNetworkDevice) -> R,
         {
             let mut device = self.0.lock();
             f(&mut *device)
+        }
+
+        fn on_rx_exhausted() {
+            aster_network::raise_receive_softirq();
         }
     }
 

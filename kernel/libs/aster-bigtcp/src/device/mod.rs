@@ -75,9 +75,23 @@ pub trait WithDevice: Send + Sync {
     // the device lock.
     type Device: AnyNetworkDevice;
 
+    /// The maximum number of packets that can be received in a single polling round.
+    ///
+    /// [`Self::on_rx_exhausted`] should be overridden after specifying this.
+    const RX_BUDGET: usize = usize::MAX;
+
     fn with<F, R>(&self, f: F) -> R
     where
         F: FnOnce(&mut dyn AnyNetworkDevice) -> R;
+
+    /// The callback will be invoked if [`Self::RX_BUDGET`] has been reached in a single polling
+    /// round but there are still packets pending.
+    fn on_rx_exhausted() {
+        debug_assert!(
+            false,
+            "`RX_BUDGET` is `usize::MAX`, which should never be reached"
+        );
+    }
 }
 
 /// Creates a smoltcp [`Interface`] with the specified capabilities.
