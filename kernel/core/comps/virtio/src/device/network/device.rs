@@ -224,16 +224,22 @@ impl NetworkDevice {
         debug_assert!(self.tx_buffers[token as usize].is_none());
         self.tx_buffers[token as usize] = Some(tx_buffer);
 
-        self.free_processed_tx_buffers();
-
-        // If the send queue is not full, we can free the send buffers during the next sending process.
-        // Therefore, there is no need to free the used buffers in the IRQ handlers.
-        // This allows us to temporarily disable the send queue interrupt.
-        // Conversely, if the send queue is full, the send queue interrupt should remain enabled
+        // If the send queue is full, the send queue interrupt should remain enabled
         // to free the send buffers as quickly as possible.
         if !self.can_send() {
             self.send_queue.enable_callback();
-        } else {
+        }
+
+        // We must do this after `enable_callback()`.
+        // Otherwise, a concurrent send queue interrupt could be missed,
+        // and we would never have the opportunity to free the send buffers.
+        self.free_processed_tx_buffers();
+
+        // If the send queue is not full,
+        // we can free the send buffers during the next sending process.
+        // Therefore, there is no need to free the used buffers in the IRQ handlers.
+        // This allows us to temporarily disable the send queue interrupt.
+        if self.can_send() {
             self.send_queue.disable_callback();
         }
 
