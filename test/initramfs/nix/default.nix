@@ -36,6 +36,7 @@ rec {
   benchmark = pkgs.callPackage ./benchmark { inherit benchmarkName; };
   conformance = pkgs.callPackage ./conformance {
     inherit smp;
+    inherit target;
     testSuite = conformanceTestSuite;
     workDir = conformanceTestWorkDir;
     testSelector = conformanceTestSelector;

@@ -16,6 +16,7 @@ CONFORMANCE_TEST_SELECTOR=${CONFORMANCE_TEST_SELECTOR:-}
 
 SCRIPT_DIR=$(dirname "$0")
 ALL_TESTS="$SCRIPT_DIR/testcases/all.txt"
+AARCH64_BLOCKLIST="$SCRIPT_DIR/testcases/blocked/aarch64.txt"
 EXT2_BLOCKLIST="$SCRIPT_DIR/testcases/blocked/ext2.txt"
 EXFAT_BLOCKLIST="$SCRIPT_DIR/testcases/blocked/exfat.txt"
 RUN_BASH="$SCRIPT_DIR/run_ltp_test.sh"
@@ -80,6 +81,8 @@ if [ -n "$CONFORMANCE_TEST_SELECTOR" ]; then
     if [ "$invalid_selector" -ne 0 ]; then
         exit 2
     fi
+elif [ "$TARGET_ARCH" = "aarch64" ]; then
+    filter_tests_by_blocklist "$AARCH64_BLOCKLIST"
 elif [ "$CONFORMANCE_TEST_WORKDIR" = "/ext2" ]; then
     filter_tests_by_blocklist "$EXT2_BLOCKLIST"
 elif [ "$CONFORMANCE_TEST_WORKDIR" = "/exfat" ]; then
