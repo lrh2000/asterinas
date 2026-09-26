@@ -127,9 +127,16 @@ echo "All mount bind file test passed."
 ./mount/listmount
 ./mount/mount_api
 ./mount/mount_move
+./mount/mount_propagation
 
+./overlayfs/lchown_lower_symlink
+./overlayfs/link_lower_file
+./overlayfs/mknod_whiteout_rejected
 ./overlayfs/ovl_test
 ./overlayfs/readdir_small_buffer
+./overlayfs/rmdir_lower_only_nonempty
+./overlayfs/sparse_copyup_consistency
+./overlayfs/xino_dino_identity
 
 ./procfs/dentry_cache
 ./procfs/fd
